@@ -3,7 +3,6 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ScheduleModule } from '@nestjs/schedule';
 import { AppController } from '../controllers/app.controller';
-import { AppService } from '../services/app.service';
 import { WeatherModule } from './weather.module';
 
 @Module({
@@ -19,6 +18,5 @@ import { WeatherModule } from './weather.module';
     WeatherModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
 })
 export class AppModule {}

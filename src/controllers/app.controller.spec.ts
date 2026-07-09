@@ -1,22 +1,39 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { AppController } from './app.controller';
-import { AppService } from '../services/app.service';
+import { WeatherService } from '../services/weather.service';
 
 describe('AppController', () => {
   let appController: AppController;
+  let weatherService: { evaluateAndPersistCurrentWeather: jest.Mock };
 
   beforeEach(async () => {
+    weatherService = {
+      evaluateAndPersistCurrentWeather: jest.fn(),
+    };
+
     const app: TestingModule = await Test.createTestingModule({
       controllers: [AppController],
-      providers: [AppService],
+      providers: [{ provide: WeatherService, useValue: weatherService }],
     }).compile();
 
     appController = app.get<AppController>(AppController);
   });
 
   describe('root', () => {
-    it('should return "Hello World!"', () => {
-      expect(appController.getHello()).toBe('Hello World!');
+    it('deve retornar o alerta climático atual produzido pelo WeatherService', async () => {
+      const mockAlert = {
+        cidade: 'São Luís - MA',
+        tipoAlerta: 'NORMAL',
+        descricao: 'Condições climáticas estáveis. Situação segura para a população.',
+        nivelSeveridade: 'INFORMATIVO',
+        zonasAfetadas: [],
+      };
+      weatherService.evaluateAndPersistCurrentWeather.mockResolvedValue(mockAlert);
+
+      const result = await appController.getCurrentWeather();
+
+      expect(weatherService.evaluateAndPersistCurrentWeather).toHaveBeenCalled();
+      expect(result).toEqual(mockAlert);
     });
   });
 });
