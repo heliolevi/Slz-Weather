@@ -1,136 +1,147 @@
-﻿# São Luís Weather Watch - Sistema de Alerta Precoce
+# São Luís Weather Watch — Sistema de Inteligência Climática e Resiliência para a Defesa Civil
 
-## Visão Geral
+![Build](https://img.shields.io/badge/build-passing-brightgreen)
+![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
+![NestJS](https://img.shields.io/badge/NestJS-11-E0234E?logo=nestjs&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
+![License](https://img.shields.io/badge/license-UNLICENSED-lightgrey)
 
-O `São Luís Weather Watch` é um microsserviço NestJS para Defesa Civil de São Luís - MA. Ele combina dados meteorológicos reais da API Open-Meteo com um motor de regras críticas e um simulador sísmico para gerar alertas de severidade em tempo real.
+> Badges de build/testes acima são placeholders — troque pelos badges reais do seu pipeline de CI (GitHub Actions, GitLab CI, etc.) assim que ele estiver configurado.
 
-O propósito principal é:
-- salvar vidas;
-- mitigar desastres;
-- expor eventos extremos para painéis de crise;
-- armazenar histórico de alertas em MongoDB.
+## O Problema
 
-## Estrutura do Projeto
+Sistemas de alerta climático para Defesa Civil não têm margem para falha silenciosa. Se a API meteorológica externa cair, atrasar ou timeout — no meio de uma tempestade — o serviço não pode simplesmente parar de responder. É exatamente quando o risco é maior que a infraestrutura de monitoramento mais precisa ficar de pé.
 
-- `src/weather/weather.schema.ts` — Modelo MongoDB do log de alertas, incluindo severidade e ação preventiva.
-- `src/weather/weather.service.ts` — Motor analítico com regras de vento, chuva e abalos sísmicos simulados.
-- `src/weather/weather.cron.ts` — Agendamento com `@Cron` a cada 30 minutos.
-- `src/weather/weather.controller.ts` — Endpoints REST documentados com Swagger.
-- `src/weather/weather.module.ts` — Configuração de dependências NestJS, Mongoose, HttpModule e ScheduleModule.
+**São Luís Weather Watch** é uma API construída em NestJS que consome dados meteorológicos em tempo real, aplica um motor de regras de severidade (vento, chuva, sismo) e converte isso em alertas acionáveis — com **zoneamento por bairro**, **notificação automática via webhook** e **disponibilidade contínua mesmo quando a fonte de dados externa falha**.
 
-## Requisitos
+Para o gestor público: o sistema garante que a última informação confiável nunca desaparece — se a Open-Meteo cair, a API responde com o último dado válido em cache, sinalizado como tal, em vez de retornar erro ou nada.
 
-- Node.js 20+
-- pnpm
-- MongoDB rodando localmente ou via URI de conexão
+Para o time técnico: a resiliência não é um detalhe de implementação, é a arquitetura — retry com backoff exponencial, circuit breaker com fallback para MongoDB e logs estruturados que isolam causa raiz (DNS, timeout ou indisponibilidade real) em segundos.
 
-## Instalação
+## Funcionalidades
+
+### Motor de Alertas
+- Avaliação de severidade em 4 níveis: `INFORMATIVO`, `ATENÇÃO`, `ALERTA`, `EMERGÊNCIA`, a partir de vento, rajadas, precipitação e simulação de sensor sísmico.
+- **Geofencing lógico**: cada alerta carrega `zonasAfetadas`, mapeando automaticamente bairros de risco (Orla Marítima, Península, Cohab, Centro Histórico, entre outros) conforme o tipo e a severidade do evento.
+- Persistência histórica de todos os alertas no MongoDB.
+
+### Resiliência de Rede
+- **Retry com backoff exponencial** (RxJS `retry` + `defer`): falhas transitórias — como HTTP 503 e timeout — são reexecutadas automaticamente (até 3 tentativas, 300ms → 600ms → 1200ms), sem re-emitir a mesma requisição já resolvida.
+- **Classificação de falhas**: cada erro externo é categorizado como `DNS`, `TIMEOUT`, `INDISPONIVEL` ou `CANCELADO` via `axios.isAxiosError`, decidindo automaticamente o que vale a pena reexecutar e o que deve falhar rápido.
+- **Circuit Breaker com fallback**: se todas as tentativas contra a Open-Meteo se esgotarem, o serviço recupera o último alerta salvo no MongoDB, marca a resposta com `[MODO CONTINGÊNCIA - DADO EM CACHE]` e a retorna normalmente — o cliente nunca recebe um erro genérico de indisponibilidade.
+- **Logs estruturados**: cada falha é logada no formato `[origem=Open-Meteo tipo=TIMEOUT codigo=ETIMEDOUT tentativa=2/3] mensagem`, grepável e pronto para dashboards de observabilidade.
+
+### Notificação e Analytics
+- **Webhook assíncrono e não-bloqueante**: alertas de severidade `ALERTA` ou `EMERGÊNCIA` disparam um POST para o endpoint da Defesa Civil em paralelo, sem travar a resposta ao cliente e com try/catch isolado.
+- **Pipeline de agregação (média móvel)**: cálculo da precipitação média das últimas 3 horas via MongoDB Aggregation Framework, sinalizando risco de inundação súbita quando a média ultrapassa 10mm.
+- Agendamento automático (`@Cron`) executando a análise climática a cada 30 minutos.
+
+## Stack Tecnológica
+
+| Camada | Tecnologia |
+|---|---|
+| Framework | NestJS 11 |
+| Linguagem | TypeScript 5.7 |
+| Cliente HTTP | Axios + `@nestjs/axios` |
+| Reatividade / Resiliência | RxJS 7 (`retry`, `defer`, `timer`) |
+| Persistência | MongoDB + Mongoose |
+| Configuração | `@nestjs/config` (variáveis de ambiente) |
+| Agendamento | `@nestjs/schedule` |
+| Documentação | Swagger (`@nestjs/swagger`) |
+| Testes | Jest + `@nestjs/testing` |
+
+## Arquitetura do Projeto
+
+O código é organizado em camadas por responsabilidade técnica:
+
+```
+src/
+├── main.ts                  # Bootstrap da aplicação e configuração do Swagger
+├── controllers/             # Camada HTTP — validação de entrada e formatação de resposta
+│   ├── app.controller.ts
+│   └── weather.controller.ts
+├── services/                # Regras de negócio: motor de severidade, resiliência, webhook
+│   ├── weather.service.ts
+│   └── weather.cron.ts
+├── modules/                 # Composição de dependências (Nest DI)
+│   ├── app.module.ts
+│   └── weather.module.ts
+└── schemas/                 # Modelos Mongoose
+    └── weather.schema.ts
+```
+
+## Como Rodar
+
+### Pré-requisitos
+- Node.js 20+ (recomendado 22 LTS ou superior)
+- [pnpm](https://pnpm.io/)
+- Uma instância MongoDB (local ou Atlas)
+
+### Instalação
 
 ```bash
 pnpm install
 ```
 
-## Configuração do MongoDB
+### Configuração de ambiente
 
-Esta aplicação já está preparada para uma conexão local padrão no `AppModule`:
+Copie o arquivo de exemplo e preencha com suas credenciais:
 
-```ts
-MongooseModule.forRoot('mongodb://localhost:27017/sao-luis-weather-watch')
+```bash
+cp .env.example .env
 ```
 
-Se precisar usar outra URI, substitua a string acima ou mova a configuração para variáveis de ambiente e o `app.module.ts`.
+Variáveis obrigatórias no `.env`:
 
-## Executando o Serviço
+```env
+MONGODB_URI=mongodb+srv://<usuario>:<senha>@<cluster>/sao-luis-weather-watch
+OPENWEATHER_API_KEY=<sua-chave-openweathermap>
+```
+
+> `MONGODB_URI` é obrigatória — a aplicação falha ao subir sem ela. `OPENWEATHER_API_KEY` é carregada via `ConfigService` e reservada para uma futura fonte de dados secundária; a fonte principal de clima em tempo real (Open-Meteo) não exige chave.
+
+### Executando
 
 ```bash
 pnpm run start:dev
 ```
 
-O servidor ficará disponível na porta padrão `3000`.
+O servidor sobe em `http://localhost:3000`.
 
-## Endpoints Disponíveis
+## Documentação da API
 
-### Swagger
+A documentação interativa (Swagger) fica disponível em:
 
-A documentação interativa estará disponível em:
-
-```text
+```
 http://localhost:3000/api
 ```
 
-> Caso o Swagger não esteja configurado no `main.ts`, registre `SwaggerModule` para habilitar a interface.
+### Endpoints principais
 
-### API REST
+| Método | Rota | Descrição |
+|---|---|---|
+| `GET` | `/` | Executa a análise climática atual e retorna o alerta vigente. |
+| `GET` | `/clima/atual` | Consulta a Open-Meteo, avalia as regras de severidade, persiste e retorna o alerta atual. |
+| `GET` | `/clima/alertas` | Histórico completo de alertas, do mais recente ao mais antigo. |
+| `GET` | `/clima/emergencias` | Feed de crises: alertas `ALERTA`/`EMERGÊNCIA` das últimas 24 horas. |
+| `GET` | `/clima/tendencia` | Média móvel de precipitação das últimas 3 horas e sinalização de risco de inundação súbita. |
 
-Base: `http://localhost:3000/clima`
+## Testes Automatizados
 
-- `GET /clima/atual`
-  - Acessa a API Open-Meteo, avalia regras de proteção civil, grava o alerta no MongoDB e retorna o registro atual.
+```bash
+pnpm test          # suíte de testes unitários (Jest)
+pnpm run test:cov  # com relatório de cobertura
+pnpm run test:e2e  # testes end-to-end
+```
 
-- `GET /clima/alertas`
-  - Retorna o histórico completo de alertas, ordenado do mais recente para o mais antigo.
+A suíte cobre, entre outros cenários:
+- Geração correta de severidade `EMERGÊNCIA` e zoneamento por vento acima de 60km/h.
+- Ativação do circuit breaker e fallback para o último registro em cache quando a API externa falha.
+- Retry automático em erro 503 com sucesso na tentativa seguinte, e não-retentativa em falhas de DNS.
+- Cálculo correto da média móvel de precipitação via pipeline de agregação do MongoDB.
 
-- `GET /clima/emergencias`
-  - Feed de crises: retorna apenas alertas em `ALERTA` ou `EMERGÊNCIA` das últimas 24 horas.
+## Roadmap
 
-## Regras de Severidade
-
-Os alertas são categorizados em quatro níveis:
-
-- `INFORMATIVO` — Clima seguro.
-- `ATENÇÃO` — Mudança que exige vigilância.
-- `ALERTA` — Risco iminente de danos ou alagamentos.
-- `EMERGÊNCIA` — Perigo de vida, desastre severo ou evacuação necessária.
-
-## Lógica de Análise
-
-O motor de regras do serviço avalia:
-
-- Ventos fortes e rajadas
-- Temperaturas e precipitação
-- Simulação de sensor sísmico com escala Richter
-
-### Exemplos de regras
-
-- vento 25–40 km/h → `ATENÇÃO`
-- vento > 40 km/h → `ALERTA`
-- rajada > 60 km/h → `EMERGÊNCIA`
-- chuva > 10 mm → `ALERTA`
-- sismo simulado > 3.5 → `EMERGÊNCIA`
-
-## Agendamento
-
-O cron job `WeatherCron` roda automaticamente a cada 30 minutos e persiste novos alertas no MongoDB.
-
-## Como testar manualmente
-
-1. Inicie o serviço:
-   ```bash
-   pnpm run start:dev
-   ```
-2. Consuma o endpoint de current:
-   ```bash
-   curl http://localhost:3000/clima/atual
-   ```
-3. Veja histórico:
-   ```bash
-   curl http://localhost:3000/clima/alertas
-   ```
-4. Veja feed de emergências:
-   ```bash
-   curl http://localhost:3000/clima/emergencias
-   ```
-
-## Desenvolvimento
-
-- Mantenha a separação entre domínio, infraestrutura e controller.
-- O `weather.service.ts` representa o cerne das regras de negócio.
-- O `weather.controller.ts` expõe apenas as operações necessárias para a Defesa Civil.
-
-## Notas finais
-
-Este microsserviço já está estruturado para evolução futura:
-- integração com alertas por SMS/Push;
-- adição de fontes de terremoto reais;
-- dashboards de crise em tempo real;
-- métricas e alertas automatizados para equipes de resposta.
+- Integração com canais de notificação por SMS/Push para a população.
+- Dashboard de crise em tempo real para operadores da Defesa Civil.
+- Métricas de observabilidade (Prometheus/Grafana) a partir dos logs estruturados já existentes.
