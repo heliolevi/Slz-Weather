@@ -6,9 +6,6 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-UNLICENSED-lightgrey)
 
-![Build Status](https://github.com/seu-usuario/nome-do-repo/actions/workflows/ci.yml/badge.svg)
-![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
-
 ## O Problema
 
 Sistemas de alerta climático para Defesa Civil não têm margem para falha silenciosa. Se a API meteorológica externa cair, atrasar ou timeout — no meio de uma tempestade — o serviço não pode simplesmente parar de responder. É exatamente quando o risco é maior que a infraestrutura de monitoramento mais precisa ficar de pé.
