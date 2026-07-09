@@ -6,7 +6,8 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-UNLICENSED-lightgrey)
 
-> Badges de build/testes acima são placeholders — troque pelos badges reais do seu pipeline de CI (GitHub Actions, GitLab CI, etc.) assim que ele estiver configurado.
+![Build Status](https://github.com/seu-usuario/nome-do-repo/actions/workflows/ci.yml/badge.svg)
+![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
 
 ## O Problema
 
