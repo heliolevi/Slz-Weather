@@ -1,98 +1,136 @@
-<p align="center">
-  <a href="http://nestjs.com/" target="blank"><img src="https://nestjs.com/img/logo-small.svg" width="120" alt="Nest Logo" /></a>
-</p>
+﻿# São Luís Weather Watch - Sistema de Alerta Precoce
 
-[circleci-image]: https://img.shields.io/circleci/build/github/nestjs/nest/master?token=abc123def456
-[circleci-url]: https://circleci.com/gh/nestjs/nest
+## Visão Geral
 
-  <p align="center">A progressive <a href="http://nodejs.org" target="_blank">Node.js</a> framework for building efficient and scalable server-side applications.</p>
-    <p align="center">
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/v/@nestjs/core.svg" alt="NPM Version" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/l/@nestjs/core.svg" alt="Package License" /></a>
-<a href="https://www.npmjs.com/~nestjscore" target="_blank"><img src="https://img.shields.io/npm/dm/@nestjs/common.svg" alt="NPM Downloads" /></a>
-<a href="https://circleci.com/gh/nestjs/nest" target="_blank"><img src="https://img.shields.io/circleci/build/github/nestjs/nest/master" alt="CircleCI" /></a>
-<a href="https://discord.gg/G7Qnnhy" target="_blank"><img src="https://img.shields.io/badge/discord-online-brightgreen.svg" alt="Discord"/></a>
-<a href="https://opencollective.com/nest#backer" target="_blank"><img src="https://opencollective.com/nest/backers/badge.svg" alt="Backers on Open Collective" /></a>
-<a href="https://opencollective.com/nest#sponsor" target="_blank"><img src="https://opencollective.com/nest/sponsors/badge.svg" alt="Sponsors on Open Collective" /></a>
-  <a href="https://paypal.me/kamilmysliwiec" target="_blank"><img src="https://img.shields.io/badge/Donate-PayPal-ff3f59.svg" alt="Donate us"/></a>
-    <a href="https://opencollective.com/nest#sponsor"  target="_blank"><img src="https://img.shields.io/badge/Support%20us-Open%20Collective-41B883.svg" alt="Support us"></a>
-  <a href="https://twitter.com/nestframework" target="_blank"><img src="https://img.shields.io/twitter/follow/nestframework.svg?style=social&label=Follow" alt="Follow us on Twitter"></a>
-</p>
-  <!--[![Backers on Open Collective](https://opencollective.com/nest/backers/badge.svg)](https://opencollective.com/nest#backer)
-  [![Sponsors on Open Collective](https://opencollective.com/nest/sponsors/badge.svg)](https://opencollective.com/nest#sponsor)-->
+O `São Luís Weather Watch` é um microsserviço NestJS para Defesa Civil de São Luís - MA. Ele combina dados meteorológicos reais da API Open-Meteo com um motor de regras críticas e um simulador sísmico para gerar alertas de severidade em tempo real.
 
-## Description
+O propósito principal é:
+- salvar vidas;
+- mitigar desastres;
+- expor eventos extremos para painéis de crise;
+- armazenar histórico de alertas em MongoDB.
 
-[Nest](https://github.com/nestjs/nest) framework TypeScript starter repository.
+## Estrutura do Projeto
 
-## Project setup
+- `src/weather/weather.schema.ts` — Modelo MongoDB do log de alertas, incluindo severidade e ação preventiva.
+- `src/weather/weather.service.ts` — Motor analítico com regras de vento, chuva e abalos sísmicos simulados.
+- `src/weather/weather.cron.ts` — Agendamento com `@Cron` a cada 30 minutos.
+- `src/weather/weather.controller.ts` — Endpoints REST documentados com Swagger.
+- `src/weather/weather.module.ts` — Configuração de dependências NestJS, Mongoose, HttpModule e ScheduleModule.
 
-```bash
-$ pnpm install
-```
+## Requisitos
 
-## Compile and run the project
+- Node.js 20+
+- pnpm
+- MongoDB rodando localmente ou via URI de conexão
+
+## Instalação
 
 ```bash
-# development
-$ pnpm run start
-
-# watch mode
-$ pnpm run start:dev
-
-# production mode
-$ pnpm run start:prod
+pnpm install
 ```
 
-## Run tests
+## Configuração do MongoDB
+
+Esta aplicação já está preparada para uma conexão local padrão no `AppModule`:
+
+```ts
+MongooseModule.forRoot('mongodb://localhost:27017/sao-luis-weather-watch')
+```
+
+Se precisar usar outra URI, substitua a string acima ou mova a configuração para variáveis de ambiente e o `app.module.ts`.
+
+## Executando o Serviço
 
 ```bash
-# unit tests
-$ pnpm run test
-
-# e2e tests
-$ pnpm run test:e2e
-
-# test coverage
-$ pnpm run test:cov
+pnpm run start:dev
 ```
 
-## Deployment
+O servidor ficará disponível na porta padrão `3000`.
 
-When you're ready to deploy your NestJS application to production, there are some key steps you can take to ensure it runs as efficiently as possible. Check out the [deployment documentation](https://docs.nestjs.com/deployment) for more information.
+## Endpoints Disponíveis
 
-If you are looking for a cloud-based platform to deploy your NestJS application, check out [Mau](https://mau.nestjs.com), our official platform for deploying NestJS applications on AWS. Mau makes deployment straightforward and fast, requiring just a few simple steps:
+### Swagger
 
-```bash
-$ pnpm install -g @nestjs/mau
-$ mau deploy
+A documentação interativa estará disponível em:
+
+```text
+http://localhost:3000/api
 ```
 
-With Mau, you can deploy your application in just a few clicks, allowing you to focus on building features rather than managing infrastructure.
+> Caso o Swagger não esteja configurado no `main.ts`, registre `SwaggerModule` para habilitar a interface.
 
-## Resources
+### API REST
 
-Check out a few resources that may come in handy when working with NestJS:
+Base: `http://localhost:3000/clima`
 
-- Visit the [NestJS Documentation](https://docs.nestjs.com) to learn more about the framework.
-- For questions and support, please visit our [Discord channel](https://discord.gg/G7Qnnhy).
-- To dive deeper and get more hands-on experience, check out our official video [courses](https://courses.nestjs.com/).
-- Deploy your application to AWS with the help of [NestJS Mau](https://mau.nestjs.com) in just a few clicks.
-- Visualize your application graph and interact with the NestJS application in real-time using [NestJS Devtools](https://devtools.nestjs.com).
-- Need help with your project (part-time to full-time)? Check out our official [enterprise support](https://enterprise.nestjs.com).
-- To stay in the loop and get updates, follow us on [X](https://x.com/nestframework) and [LinkedIn](https://linkedin.com/company/nestjs).
-- Looking for a job, or have a job to offer? Check out our official [Jobs board](https://jobs.nestjs.com).
+- `GET /clima/atual`
+  - Acessa a API Open-Meteo, avalia regras de proteção civil, grava o alerta no MongoDB e retorna o registro atual.
 
-## Support
+- `GET /clima/alertas`
+  - Retorna o histórico completo de alertas, ordenado do mais recente para o mais antigo.
 
-Nest is an MIT-licensed open source project. It can grow thanks to the sponsors and support by the amazing backers. If you'd like to join them, please [read more here](https://docs.nestjs.com/support).
+- `GET /clima/emergencias`
+  - Feed de crises: retorna apenas alertas em `ALERTA` ou `EMERGÊNCIA` das últimas 24 horas.
 
-## Stay in touch
+## Regras de Severidade
 
-- Author - [Kamil Myśliwiec](https://twitter.com/kammysliwiec)
-- Website - [https://nestjs.com](https://nestjs.com/)
-- Twitter - [@nestframework](https://twitter.com/nestframework)
+Os alertas são categorizados em quatro níveis:
 
-## License
+- `INFORMATIVO` — Clima seguro.
+- `ATENÇÃO` — Mudança que exige vigilância.
+- `ALERTA` — Risco iminente de danos ou alagamentos.
+- `EMERGÊNCIA` — Perigo de vida, desastre severo ou evacuação necessária.
 
-Nest is [MIT licensed](https://github.com/nestjs/nest/blob/master/LICENSE).
+## Lógica de Análise
+
+O motor de regras do serviço avalia:
+
+- Ventos fortes e rajadas
+- Temperaturas e precipitação
+- Simulação de sensor sísmico com escala Richter
+
+### Exemplos de regras
+
+- vento 25–40 km/h → `ATENÇÃO`
+- vento > 40 km/h → `ALERTA`
+- rajada > 60 km/h → `EMERGÊNCIA`
+- chuva > 10 mm → `ALERTA`
+- sismo simulado > 3.5 → `EMERGÊNCIA`
+
+## Agendamento
+
+O cron job `WeatherCron` roda automaticamente a cada 30 minutos e persiste novos alertas no MongoDB.
+
+## Como testar manualmente
+
+1. Inicie o serviço:
+   ```bash
+   pnpm run start:dev
+   ```
+2. Consuma o endpoint de current:
+   ```bash
+   curl http://localhost:3000/clima/atual
+   ```
+3. Veja histórico:
+   ```bash
+   curl http://localhost:3000/clima/alertas
+   ```
+4. Veja feed de emergências:
+   ```bash
+   curl http://localhost:3000/clima/emergencias
+   ```
+
+## Desenvolvimento
+
+- Mantenha a separação entre domínio, infraestrutura e controller.
+- O `weather.service.ts` representa o cerne das regras de negócio.
+- O `weather.controller.ts` expõe apenas as operações necessárias para a Defesa Civil.
+
+## Notas finais
+
+Este microsserviço já está estruturado para evolução futura:
+- integração com alertas por SMS/Push;
+- adição de fontes de terremoto reais;
+- dashboards de crise em tempo real;
+- métricas e alertas automatizados para equipes de resposta.

@@ -1,5 +1,5 @@
 {
-  "name": "marvel-chronology-backend",
+  "name": "starwars-galaxy-backend",
   "version": "0.0.1",
   "description": "",
   "author": "",
@@ -20,9 +20,17 @@
     "test:e2e": "jest --config ./test/jest-e2e.json"
   },
   "dependencies": {
+    "@nestjs/axios": "^4.0.1",
     "@nestjs/common": "^11.0.1",
+    "@nestjs/config": "^4.0.4",
     "@nestjs/core": "^11.0.1",
+    "@nestjs/mapped-types": "^2.1.1",
+    "@nestjs/mongoose": "^11.0.4",
     "@nestjs/platform-express": "^11.0.1",
+    "@nestjs/schedule": "^6.1.3",
+    "@nestjs/swagger": "^11.4.5",
+    "axios": "^1.18.1",
+    "mongoose": "^7.8.11",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1"
   },
