@@ -206,6 +206,200 @@ describe('WeatherService', () => {
 
       await expect(service.evaluateAndPersistCurrentWeather()).rejects.toThrow();
     });
+
+    it('NUNCA deve criar uma nova EMERGÊNCIA a partir de um estado INDISPONÍVEL — o cache é servido como está, rotulado', async () => {
+      httpService.get.mockReturnValue(throwError(() => new Error('API fora do ar')));
+
+      const cachedEmergencia = {
+        id: 'cached-emergencia-antiga',
+        descricao: 'ABALO SÍSMICO DETECTADO. Defesa Civil acionada para vistoria de estruturas prediais.',
+        nivelSeveridade: 'EMERGÊNCIA',
+      };
+      const execMock = jest.fn().mockResolvedValue(cachedEmergencia);
+      const sortMock = jest.fn().mockReturnValue({ exec: execMock });
+      weatherAlertModel.findOne.mockReturnValue({ sort: sortMock });
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      // A EMERGÊNCIA devolvida é a ÚLTIMA JÁ CONFIRMADA em cache (explicitamente rotulada como tal).
+      // Nenhum novo alerta é criado/persistido a partir do estado de indisponibilidade.
+      expect(mockSave).not.toHaveBeenCalled();
+      expect(result.descricao).toContain('[MODO CONTINGÊNCIA - DADO EM CACHE]');
+    });
+  });
+
+  describe('Sanity Check - Double-Check obrigatório antes de confirmar EMERGÊNCIA', () => {
+    const leituraComRajadaCritica = {
+      temperature_2m: 29,
+      relative_humidity_2m: 80,
+      precipitation: 2,
+      wind_speed_10m: 65,
+      wind_gusts_10m: 72, // > 60km/h => dispara EMERGÊNCIA (VENTANIA) na primeira leitura
+    };
+
+    it('deve manter EMERGÊNCIA (VENTANIA) quando a segunda leitura de confirmação também indica rajada crítica', async () => {
+      httpService.get.mockReturnValue(of({ data: { current: leituraComRajadaCritica } }));
+      httpService.post.mockReturnValue(of({ data: {} }));
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-confirmado' });
+      });
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      expect(httpService.get).toHaveBeenCalledTimes(2); // 1ª leitura + confirmação
+      expect(result.nivelSeveridade).toBe('EMERGÊNCIA');
+      expect(result.tipoAlerta).toBe('VENTANIA');
+    });
+
+    it('deve rebaixar para ALERTA quando a segunda leitura NÃO confirma a rajada crítica (falso positivo)', async () => {
+      let chamada = 0;
+      httpService.get.mockImplementation(() => {
+        chamada += 1;
+        if (chamada === 1) {
+          return of({ data: { current: leituraComRajadaCritica } });
+        }
+        return of({ data: { current: { ...leituraComRajadaCritica, wind_gusts_10m: 30 } } });
+      });
+      httpService.post.mockReturnValue(of({ data: {} }));
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-rebaixado' });
+      });
+      const auditoriaSpy = jest.spyOn(service['logger'], 'warn');
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      expect(httpService.get).toHaveBeenCalledTimes(2);
+      expect(result.nivelSeveridade).toBe('ALERTA');
+      expect(result.descricao).toContain('NÃO CONFIRMADA');
+      expect(auditoriaSpy).toHaveBeenCalledWith(expect.stringContaining('[AUDITORIA]'));
+      expect(auditoriaSpy).toHaveBeenCalledWith(expect.stringContaining('VENTANIA'));
+    });
+
+    it('deve rebaixar para ALERTA (nunca escalar) quando a rede falha durante a confirmação', async () => {
+      let chamada = 0;
+      httpService.get.mockImplementation(() => {
+        chamada += 1;
+        if (chamada === 1) {
+          return of({ data: { current: leituraComRajadaCritica } });
+        }
+        return throwError(() => new Error('Falha de rede durante a confirmação'));
+      });
+      httpService.post.mockReturnValue(of({ data: {} }));
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-rede-falhou-na-confirmacao' });
+      });
+      const auditoriaSpy = jest.spyOn(service['logger'], 'warn');
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      expect(result.nivelSeveridade).toBe('ALERTA');
+      expect(mockSave).toHaveBeenCalled();
+      expect(auditoriaSpy).toHaveBeenCalledWith(expect.stringContaining('[AUDITORIA]'));
+      expect(auditoriaSpy).toHaveBeenCalledWith(expect.stringContaining('VENTANIA'));
+    });
+
+    it('deve manter EMERGÊNCIA (TERREMOTO) quando duas leituras sísmicas consecutivas concordam', async () => {
+      httpService.get.mockReturnValue(
+        of({
+          data: {
+            current: {
+              temperature_2m: 28,
+              relative_humidity_2m: 75,
+              precipitation: 1,
+              wind_speed_10m: 10,
+              wind_gusts_10m: 15,
+            },
+          },
+        }),
+      );
+      httpService.post.mockReturnValue(of({ data: {} }));
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-terremoto-confirmado' });
+      });
+
+      jest
+        .spyOn(service as unknown as { simulateEarthquakeSensor: () => number }, 'simulateEarthquakeSensor')
+        .mockReturnValueOnce(4.2) // 1ª leitura: dispara EMERGÊNCIA/TERREMOTO
+        .mockReturnValueOnce(3.8); // 2ª leitura (confirmação independente): também acima do limiar
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      expect(result.nivelSeveridade).toBe('EMERGÊNCIA');
+      expect(result.tipoAlerta).toBe('TERREMOTO');
+    });
+
+    it('deve reclassificar por vento/chuva (não descartar a leitura) quando a segunda leitura sísmica NÃO confirma', async () => {
+      httpService.get.mockReturnValue(
+        of({
+          data: {
+            current: {
+              temperature_2m: 28,
+              relative_humidity_2m: 75,
+              precipitation: 1,
+              wind_speed_10m: 10,
+              wind_gusts_10m: 15,
+            },
+          },
+        }),
+      );
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-terremoto-nao-confirmado' });
+      });
+
+      jest
+        .spyOn(service as unknown as { simulateEarthquakeSensor: () => number }, 'simulateEarthquakeSensor')
+        .mockReturnValueOnce(4.2) // 1ª leitura: dispara EMERGÊNCIA/TERREMOTO (o falso positivo do bug relatado)
+        .mockReturnValueOnce(1.0); // 2ª leitura (confirmação): não confirma
+      const auditoriaSpy = jest.spyOn(service['logger'], 'warn');
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      // Vento fraco e sem chuva na leitura original -> cai para INFORMATIVO/NORMAL, não é descartado.
+      expect(result.nivelSeveridade).toBe('INFORMATIVO');
+      expect(result.tipoAlerta).toBe('NORMAL');
+      expect(auditoriaSpy).toHaveBeenCalledWith(expect.stringContaining('[AUDITORIA]'));
+      expect(auditoriaSpy).toHaveBeenCalledWith(expect.stringContaining('TERREMOTO'));
+    });
+  });
+
+  describe('Validação de contrato - ranges fisicamente plausíveis (Sanity Check de payload)', () => {
+    it('deve rejeitar (422) quando a velocidade do vento vier fisicamente implausível', async () => {
+      httpService.get.mockReturnValue(
+        of({
+          data: {
+            current: {
+              temperature_2m: 29,
+              relative_humidity_2m: 80,
+              precipitation: 2,
+              wind_speed_10m: 9999,
+              wind_gusts_10m: 9999,
+            },
+          },
+        }),
+      );
+
+      await expect(service.evaluateAndPersistCurrentWeather()).rejects.toThrow();
+      expect(mockSave).not.toHaveBeenCalled();
+    });
+
+    it('deve rejeitar (422) quando a velocidade do vento vier negativa', async () => {
+      httpService.get.mockReturnValue(
+        of({
+          data: {
+            current: {
+              temperature_2m: 29,
+              relative_humidity_2m: 80,
+              precipitation: 2,
+              wind_speed_10m: -5,
+              wind_gusts_10m: 10,
+            },
+          },
+        }),
+      );
+
+      await expect(service.evaluateAndPersistCurrentWeather()).rejects.toThrow();
+      expect(mockSave).not.toHaveBeenCalled();
+    });
   });
 
   describe('Engenharia de Resiliência - Retry seletivo e classificação de falhas HTTP', () => {

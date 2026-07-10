@@ -49,6 +49,9 @@ const MAX_TENTATIVAS_RETRY = 3;
 const RETRY_BACKOFF_BASE_MS = 300;
 const RETRY_BACKOFF_MAX_MS = 1200;
 
+const LIMIAR_TERREMOTO_EMERGENCIA = 3.5;
+const LIMIAR_VENTANIA_EMERGENCIA_GUST = 60;
+
 @Injectable()
 export class WeatherService {
   private readonly logger = new Logger(WeatherService.name);
@@ -76,7 +79,13 @@ export class WeatherService {
   async evaluateAndPersistCurrentWeather(): Promise<WeatherAlertDocument> {
     try {
       const current = await this.fetchCurrentWeather();
-      const alertPayload = this.buildAlertPayload(current);
+      let alertPayload = this.buildAlertPayload(current);
+
+      if (alertPayload.nivelSeveridade === 'EMERGÊNCIA') {
+        // Sanity Check (Double-Check): nenhuma EMERGÊNCIA é persistida com base em uma única leitura.
+        alertPayload = await this.confirmarEmergenciaOuRebaixar(alertPayload, current);
+      }
+
       const created = await this.saveAlert(alertPayload);
       this.logger.log(`Alerta registrado: ${created.nivelSeveridade} - ${created.descricao}`);
 
@@ -314,6 +323,94 @@ export class WeatherService {
     }
   }
 
+  /**
+   * Sanity Check (Double-Check): nenhuma EMERGÊNCIA vira alerta oficial com base numa leitura só.
+   * Exige uma segunda verificação independente da MESMA dimensão que disparou o gatilho (vento
+   * re-medido para VENTANIA, um segundo rolamento do sensor sísmico para TERREMOTO) antes de
+   * confirmar. Se a rede falhar durante essa confirmação — ou se a segunda leitura não bater —
+   * o alerta é rebaixado por segurança, nunca escalado. Um estado de indisponibilidade nunca
+   * pode ser interpretado como EMERGÊNCIA confirmada.
+   */
+  private async confirmarEmergenciaOuRebaixar(
+    payload: Omit<WeatherAlert, 'timestamp'>,
+    leituraOriginal: CurrentWeather,
+  ): Promise<Omit<WeatherAlert, 'timestamp'>> {
+    this.logger.warn(
+      `Sanity Check: EMERGÊNCIA (${payload.tipoAlerta}) detectada na primeira leitura. Solicitando confirmação antes de oficializar o alerta.`,
+    );
+
+    let confirmado: boolean;
+    let motivoNaoConfirmado = 'segunda leitura não indicou o mesmo evento crítico (provável falso positivo)';
+
+    try {
+      confirmado = await this.confirmarCriticidade(payload.tipoAlerta);
+    } catch (error) {
+      motivoNaoConfirmado = `falha ao obter a segunda leitura de confirmação: ${(error as Error).message}`;
+      confirmado = false;
+    }
+
+    if (confirmado) {
+      this.logger.warn(`Sanity Check: segunda leitura CONFIRMOU o evento crítico (${payload.tipoAlerta}). EMERGÊNCIA mantida.`);
+      return payload;
+    }
+
+    // Log de auditoria — registro explícito e grepável (`[AUDITORIA]`) de por que uma EMERGÊNCIA
+    // NÃO foi oficializada. Se a Defesa Civil perguntar "por que tal alerta não tocou?", a resposta está aqui.
+    this.logger.warn(
+      `[AUDITORIA] EMERGÊNCIA (${payload.tipoAlerta}) descartada — confirmação falhou. ` +
+        `motivo="${motivoNaoConfirmado}" timestampDecisao=${new Date().toISOString()}`,
+    );
+
+    return this.rebaixarAlertaNaoConfirmado(payload.tipoAlerta, leituraOriginal);
+  }
+
+  /**
+   * Reverifica exatamente a dimensão que gerou a EMERGÊNCIA, isolada das demais:
+   * - TERREMOTO: um segundo rolamento independente do sensor (o único jeito de "confirmar" um
+   *   dado que é, por natureza, simulado/aleatório — não reaproveita a leitura de vento).
+   * - VENTANIA: uma nova consulta real à Open-Meteo, checando só a rajada — sem recalcular sismo.
+   */
+  private async confirmarCriticidade(tipoAlerta: string): Promise<boolean> {
+    if (tipoAlerta === 'TERREMOTO') {
+      const segundaLeituraSismica = this.simulateEarthquakeSensor();
+      return segundaLeituraSismica > LIMIAR_TERREMOTO_EMERGENCIA;
+    }
+
+    if (tipoAlerta === 'VENTANIA') {
+      const segundaLeituraClimatica = await this.fetchCurrentWeather();
+      return segundaLeituraClimatica.wind_gusts_10m > LIMIAR_VENTANIA_EMERGENCIA_GUST;
+    }
+
+    return false;
+  }
+
+  /**
+   * EMERGÊNCIA não confirmada: nunca simplesmente descartamos a leitura. TERREMOTO não confirmado
+   * cai para a classificação normal de vento/chuva (a leitura original ainda é válida, só o gatilho
+   * sísmico não se sustentou). VENTANIA não confirmada é rebaixada um degrau — o vento é dado real,
+   * só a rajada extrema não se manteve na segunda medição.
+   */
+  private rebaixarAlertaNaoConfirmado(
+    tipoAlertaNaoConfirmado: string,
+    current: CurrentWeather,
+  ): Omit<WeatherAlert, 'timestamp'> {
+    if (tipoAlertaNaoConfirmado === 'TERREMOTO') {
+      return this.buildAlertPayloadPorVentoEChuva(current);
+    }
+
+    return this.withZonasAfetadas({
+      cidade: 'São Luís - MA',
+      tipoAlerta: 'VENTANIA',
+      descricao:
+        'RAJADA CRÍTICA NÃO CONFIRMADA na segunda leitura de verificação — rebaixado para ALERTA por segurança. Mantenha atenção redobrada.',
+      nivelSeveridade: 'ALERTA',
+      acaoPreventiva: 'Fiquem longe de árvores, estruturas leves e desliguem equipamentos expostos ao vento.',
+      velocidadeVento: current.wind_speed_10m,
+      precipitacao: current.precipitation,
+      temperatura: current.temperature_2m,
+    });
+  }
+
   private async fallbackToLastCachedAlert(): Promise<WeatherAlertDocument> {
     const lastAlert = await this.weatherAlertModel.findOne().sort({ timestamp: -1 }).exec();
 
@@ -324,7 +421,10 @@ export class WeatherService {
     }
 
     lastAlert.descricao = `${CONTINGENCIA_PREFIXO} ${lastAlert.descricao}`;
-    this.logger.warn(`Circuito de contingência ativado. Retornando último registro em cache: ${lastAlert.id}`);
+    this.logger.warn(
+      `Circuito de contingência ativado. Retornando último registro em cache: ${lastAlert.id} ` +
+        `(severidade em cache: ${lastAlert.nivelSeveridade} — pode estar desatualizada, status atual é desconhecido).`,
+    );
 
     return lastAlert;
   }
@@ -366,26 +466,37 @@ export class WeatherService {
     }
   }
 
+  /**
+   * Só decide o gatilho sísmico (o único componente puramente simulado/aleatório do motor).
+   * Delega tudo o mais para `buildAlertPayloadPorVentoEChuva`, que trabalha só com dados reais
+   * da Open-Meteo — separar os dois evita que uma segunda leitura de confirmação de vento
+   * "role o dado" do sismo de novo por engano (ver `confirmarCriticidade`).
+   */
   private buildAlertPayload(current: CurrentWeather): Omit<WeatherAlert, 'timestamp'> {
-    const windSpeed = current.wind_speed_10m;
-    const windGust = current.wind_gusts_10m;
-    const precipitation = current.precipitation;
     const earthquake = this.simulateEarthquakeSensor();
 
-    if (earthquake > 3.5) {
+    if (earthquake > LIMIAR_TERREMOTO_EMERGENCIA) {
       return this.withZonasAfetadas({
         cidade: 'São Luís - MA',
         tipoAlerta: 'TERREMOTO',
         descricao: 'ABALO SÍSMICO DETECTADO. Defesa Civil acionada para vistoria de estruturas prediais.',
         nivelSeveridade: 'EMERGÊNCIA',
         acaoPreventiva: 'Atingidos devem evacuar áreas inseguras e buscar abrigo estrutural seguro imediatamente.',
-        velocidadeVento: windSpeed,
-        precipitacao: precipitation,
+        velocidadeVento: current.wind_speed_10m,
+        precipitacao: current.precipitation,
         temperatura: current.temperature_2m,
       });
     }
 
-    if (windGust > 60) {
+    return this.buildAlertPayloadPorVentoEChuva(current);
+  }
+
+  private buildAlertPayloadPorVentoEChuva(current: CurrentWeather): Omit<WeatherAlert, 'timestamp'> {
+    const windSpeed = current.wind_speed_10m;
+    const windGust = current.wind_gusts_10m;
+    const precipitation = current.precipitation;
+
+    if (windGust > LIMIAR_VENTANIA_EMERGENCIA_GUST) {
       return this.withZonasAfetadas({
         cidade: 'São Luís - MA',
         tipoAlerta: 'VENTANIA',
