@@ -1,0 +1,19 @@
+// Jest Snapshot v1, https://jestjs.io/docs/snapshot-testing
+
+exports[`GET /clima/atual (integração) snapshot: corpo da resposta para o cenário de EMERGÊNCIA por vento não deve regredir 1`] = `
+{
+  "acaoPreventiva": "Desligue aparelhos elétricos, mantenha distância de fachadas e busque abrigo seguro.",
+  "cidade": "São Luís - MA",
+  "descricao": "PERIGO CRÍTICO. Risco de destelhamento e colapso de redes elétricas. Busque abrigo seguro imediatamente.",
+  "nivelSeveridade": "EMERGÊNCIA",
+  "precipitacao": 2,
+  "temperatura": 29,
+  "tipoAlerta": "VENTANIA",
+  "velocidadeVento": 65,
+  "zonasAfetadas": [
+    "Orla Marítima",
+    "Península",
+    "Avenida Litorânea",
+  ],
+}
+`;
