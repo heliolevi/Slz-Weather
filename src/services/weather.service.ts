@@ -1,10 +1,13 @@
 import { HttpService } from '@nestjs/axios';
-import { Injectable, Logger, InternalServerErrorException } from '@nestjs/common';
+import { Injectable, Logger, HttpException, InternalServerErrorException, UnprocessableEntityException } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectModel } from '@nestjs/mongoose';
+import { plainToInstance } from 'class-transformer';
+import { validate } from 'class-validator';
 import { defer, firstValueFrom, retry, timer } from 'rxjs';
 import { isAxiosError } from 'axios';
 import { Model } from 'mongoose';
+import { OpenMeteoCurrentWeatherDto } from '../dto/open-meteo-current-weather.dto';
 import { WeatherAlert, WeatherAlertDocument } from '../schemas/weather.schema';
 
 export interface CurrentWeather {
@@ -81,6 +84,12 @@ export class WeatherService {
 
       return created;
     } catch (error) {
+      if (error instanceof HttpException) {
+        // Falha de contrato (ex.: 422) é um erro estrutural, não uma indisponibilidade transitória —
+        // não deve ser mascarada pelo circuit breaker; o cliente precisa saber que o contrato quebrou.
+        throw error;
+      }
+
       this.logger.warn(`Todas as tentativas contra a Open-Meteo se esgotaram: ${(error as Error).message}. Ativando circuito de contingência.`);
       return this.fallbackToLastCachedAlert();
     }
@@ -137,11 +146,22 @@ export class WeatherService {
   }
 
   /**
+   * Busca o clima atual: rede resiliente (retry/circuit-breaker) + validação de contrato.
+   * As duas responsabilidades ficam em métodos separados de propósito — uma falha de rede
+   * (Error genérico) aciona o circuit breaker; uma falha de contrato (UnprocessableEntityException)
+   * precisa atravessar esse circuit breaker sem ser mascarada (ver `evaluateAndPersistCurrentWeather`).
+   */
+  private async fetchCurrentWeather(): Promise<CurrentWeather> {
+    const payloadBruto = await this.fetchRawCurrentWeatherPayload();
+    return this.validarContratoOpenMeteo(payloadBruto);
+  }
+
+  /**
    * Busca o clima atual na Open-Meteo com retry automático para falhas transitórias (503, timeout).
    * Cada tentativa dispara uma requisição HTTP nova (via `defer`) — sem isso, `retry` apenas
    * repetiria a Promise/observable já resolvida da primeira chamada, sem nunca tocar a rede de novo.
    */
-  private async fetchCurrentWeather(): Promise<CurrentWeather> {
+  private async fetchRawCurrentWeatherPayload(): Promise<unknown> {
     try {
       const response = await firstValueFrom(
         defer(() => this.httpService.get<OpenMeteoResponse>(this.apiUrl)).pipe(
@@ -167,18 +187,42 @@ export class WeatherService {
         throw new Error('Resposta da API Open-Meteo sem dados de clima atual (payload vazio).');
       }
 
-      return {
-        temperature_2m: payload.temperature_2m,
-        relative_humidity_2m: payload.relative_humidity_2m,
-        precipitation: payload.precipitation,
-        wind_speed_10m: payload.wind_speed_10m,
-        wind_gusts_10m: payload.wind_gusts_10m,
-      };
+      return payload;
     } catch (error) {
       const classificacao = this.classificarFalhaExterna(error);
       this.logFalhaExterna('error', error, classificacao);
       throw new Error(classificacao.mensagemAmigavel);
     }
+  }
+
+  /**
+   * Validação de contrato (class-validator): garante que o payload da Open-Meteo ainda tem o
+   * formato esperado. Se a API externa mudar a estrutura (renomear/remover campo, tipo diferente),
+   * lança 422 em vez de deixar `undefined`/NaN vazar silenciosamente para o motor de regras.
+   */
+  private async validarContratoOpenMeteo(payloadBruto: unknown): Promise<CurrentWeather> {
+    const payloadValidado = plainToInstance(OpenMeteoCurrentWeatherDto, payloadBruto);
+    const erros = await validate(payloadValidado);
+
+    if (erros.length > 0) {
+      const detalhes = erros
+        .map((erro) => Object.values(erro.constraints ?? {}).join(', '))
+        .filter(Boolean)
+        .join(' | ');
+
+      this.logger.error(`[origem=Open-Meteo tipo=CONTRATO_INVALIDO] Resposta fora do contrato esperado: ${detalhes}`);
+      throw new UnprocessableEntityException(
+        `A resposta da API Open-Meteo não corresponde ao contrato de dados esperado: ${detalhes}`,
+      );
+    }
+
+    return {
+      temperature_2m: payloadValidado.temperature_2m,
+      relative_humidity_2m: payloadValidado.relative_humidity_2m,
+      precipitation: payloadValidado.precipitation,
+      wind_speed_10m: payloadValidado.wind_speed_10m,
+      wind_gusts_10m: payloadValidado.wind_gusts_10m,
+    };
   }
 
   /**
