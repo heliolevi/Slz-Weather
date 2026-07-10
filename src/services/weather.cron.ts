@@ -26,7 +26,7 @@ export class WeatherCron {
         );
       }
     } catch (error) {
-      this.logger.error('Falha ao executar cron de alerta precoce.', error as Error);
+      this.logger.error('Falha ao executar cron de alerta precoce.', (error as Error)?.stack);
     }
   }
 }
