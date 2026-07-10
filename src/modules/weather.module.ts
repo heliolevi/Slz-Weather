@@ -3,9 +3,13 @@ import { HttpModule } from '@nestjs/axios';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ScheduleModule } from '@nestjs/schedule';
 import { WeatherController } from '../controllers/weather.controller';
+import { AlertEngineService } from '../services/alert-engine.service';
+import { SmsService } from '../services/sms.service';
+import { TaskService } from '../services/task.service';
 import { WeatherCron } from '../services/weather.cron';
 import { WeatherService } from '../services/weather.service';
 import { WeatherAlert, WeatherAlertSchema } from '../schemas/weather.schema';
+import { AlertEngineState, AlertEngineStateSchema } from '../schemas/alert-engine-state.schema';
 
 @Module({
   imports: [
@@ -16,10 +20,13 @@ import { WeatherAlert, WeatherAlertSchema } from '../schemas/weather.schema';
       headers: { 'User-Agent': 'SaoLuisWeatherWatch/1.0 (+defesa-civil-slz)' },
     }),
     ScheduleModule,
-    MongooseModule.forFeature([{ name: WeatherAlert.name, schema: WeatherAlertSchema }]),
+    MongooseModule.forFeature([
+      { name: WeatherAlert.name, schema: WeatherAlertSchema },
+      { name: AlertEngineState.name, schema: AlertEngineStateSchema },
+    ]),
   ],
   controllers: [WeatherController],
-  providers: [WeatherService, WeatherCron],
+  providers: [WeatherService, WeatherCron, AlertEngineService, SmsService, TaskService],
   exports: [WeatherService],
 })
 export class WeatherModule {}

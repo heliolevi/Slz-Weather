@@ -98,7 +98,7 @@ describe('WeatherService', () => {
       await Promise.resolve();
 
       expect(httpService.post).toHaveBeenCalledWith(
-        'https://api.defesacivil.slz.gov/v1/alerts/webhook',
+        expect.any(String),
         expect.objectContaining({ nivelSeveridade: 'EMERGÊNCIA' }),
       );
     });
@@ -122,6 +122,43 @@ describe('WeatherService', () => {
       });
 
       await service.evaluateAndPersistCurrentWeather();
+      await Promise.resolve();
+
+      expect(httpService.post).not.toHaveBeenCalled();
+    });
+
+    it('NÃO deve tentar enviar webhook quando DEFESA_CIVIL_WEBHOOK_URL não está configurada', async () => {
+      const module: TestingModule = await Test.createTestingModule({
+        providers: [
+          WeatherService,
+          { provide: HttpService, useValue: httpService },
+          { provide: ConfigService, useValue: { get: jest.fn().mockReturnValue('') } },
+          { provide: getModelToken(WeatherAlert.name), useValue: weatherAlertModel },
+        ],
+      }).compile();
+      const serviceSemWebhook = module.get<WeatherService>(WeatherService);
+      jest
+        .spyOn(serviceSemWebhook as unknown as { simulateEarthquakeSensor: () => number }, 'simulateEarthquakeSensor')
+        .mockReturnValue(0);
+
+      httpService.get.mockReturnValue(
+        of({
+          data: {
+            current: {
+              temperature_2m: 29,
+              relative_humidity_2m: 80,
+              precipitation: 2,
+              wind_speed_10m: 65,
+              wind_gusts_10m: 72,
+            },
+          },
+        }),
+      );
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-sem-webhook' });
+      });
+
+      await serviceSemWebhook.evaluateAndPersistCurrentWeather();
       await Promise.resolve();
 
       expect(httpService.post).not.toHaveBeenCalled();

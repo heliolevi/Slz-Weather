@@ -7,7 +7,7 @@ import { isAxiosError } from 'axios';
 import { Model } from 'mongoose';
 import { WeatherAlert, WeatherAlertDocument } from '../schemas/weather.schema';
 
-interface CurrentWeather {
+export interface CurrentWeather {
   temperature_2m: number;
   relative_humidity_2m: number;
   precipitation: number;
@@ -51,7 +51,7 @@ export class WeatherService {
   private readonly logger = new Logger(WeatherService.name);
   private readonly apiUrl =
     'https://api.open-meteo.com/v1/forecast?latitude=-2.5297&longitude=-44.3028&current=temperature_2m,relative_humidity_2m,precipitation,wind_speed_10m,wind_gusts_10m';
-  private readonly webhookUrl = 'https://api.defesacivil.slz.gov/v1/alerts/webhook';
+  private readonly webhookUrl: string;
   private readonly openWeatherApiKey: string;
 
   constructor(
@@ -62,6 +62,8 @@ export class WeatherService {
   ) {
     // Exemplo de carregamento seguro de API key via @nestjs/config, lida do .env (nunca hardcoded).
     this.openWeatherApiKey = this.configService.get<string>('OPENWEATHER_API_KEY', '');
+    // Sem valor padrão hardcoded: se não configurado, o disparo de webhook é simplesmente ignorado.
+    this.webhookUrl = this.configService.get<string>('DEFESA_CIVIL_WEBHOOK_URL', '');
   }
 
   /**
@@ -123,6 +125,15 @@ export class WeatherService {
         ? `RISCO DE INUNDAÇÃO SÚBITA: média de precipitação de ${mediaChuva}mm nas últimas 3 horas.`
         : `Sem risco de inundação súbita no momento. Média de precipitação de ${mediaChuva}mm nas últimas 3 horas.`,
     };
+  }
+
+  /**
+   * Leitura climática crua (sem persistir alerta nem disparar webhook), reaproveitando o mesmo
+   * pipeline de retry/circuit-breaker/classificação de falhas. Usada por outros motores de regras
+   * (ex.: AlertEngineService) que precisam apenas do dado atual, não do ciclo completo de alerta.
+   */
+  async getCurrentWeatherReading(): Promise<CurrentWeather> {
+    return this.fetchCurrentWeather();
   }
 
   /**
@@ -282,6 +293,11 @@ export class WeatherService {
       return;
     }
 
+    if (!this.webhookUrl) {
+      this.logger.debug('DEFESA_CIVIL_WEBHOOK_URL não configurado — disparo de webhook ignorado.');
+      return;
+    }
+
     void this.sendWebhookNotification(alert);
   }
 
@@ -299,7 +315,10 @@ export class WeatherService {
       );
       this.logger.log(`Webhook de alerta crítico disparado com sucesso para ${this.webhookUrl}.`);
     } catch (error) {
-      this.logger.error('Falha ao disparar webhook de alerta crítico para a Defesa Civil.', error as Error);
+      this.logger.error(
+        `Falha ao disparar webhook de alerta crítico para a Defesa Civil (${this.webhookUrl}).`,
+        (error as Error)?.stack,
+      );
     }
   }
 
