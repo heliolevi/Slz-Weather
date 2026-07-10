@@ -2,19 +2,33 @@
 
 ![Build](https://img.shields.io/badge/build-passing-brightgreen)
 ![Tests](https://img.shields.io/badge/tests-passing-brightgreen)
+![MVP](https://img.shields.io/badge/MVP-completo-blue)
 ![NestJS](https://img.shields.io/badge/NestJS-11-E0234E?logo=nestjs&logoColor=white)
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-UNLICENSED-lightgrey)
 
+## Status: MVP completo, protótipo pronto para avaliação
+
+Todas as engenharias planejadas para o MVP estão implementadas, testadas e validadas (`tsc --noEmit`, `nest build` e as suítes de teste abaixo passam limpas):
+
+- [x] Motor de severidade (vento, chuva, sismo simulado) com geofencing por bairro
+- [x] Circuit breaker com fallback para o último dado em cache no MongoDB
+- [x] Retry com backoff exponencial + classificação de falhas (DNS/timeout/indisponibilidade)
+- [x] Validação de contrato da API externa (`class-validator`) — retorna **422** em vez de quebrar se o formato mudar
+- [x] Webhook assíncrono e não-bloqueante para a Defesa Civil
+- [x] Pipeline de agregação (média móvel de chuva) para risco de inundação súbita
+- [x] Máquina de estados (`NORMAL` → `ATENÇÃO` → `EMERGÊNCIA`) com disparo de SMS **apenas na transição**, persistida no MongoDB para sobreviver a um restart
+- [x] Suíte de testes unitários (regras de negócio) e de integração via Supertest (camada HTTP)
+
 ## O Problema
 
-Sistemas de alerta climático para Defesa Civil não têm margem para falha silenciosa. Se a API meteorológica externa cair, atrasar ou timeout — no meio de uma tempestade — o serviço não pode simplesmente parar de responder. É exatamente quando o risco é maior que a infraestrutura de monitoramento mais precisa ficar de pé.
+Sistemas de alerta climático para Defesa Civil não têm margem para falha silenciosa. Se a API meteorológica externa cair, atrasar, retornar 503 ou simplesmente mudar de formato — no meio de uma tempestade — o serviço não pode parar de responder nem entregar dado incorreto sem avisar. É exatamente quando o risco é maior que a infraestrutura de monitoramento mais precisa ficar de pé.
 
-**São Luís Weather Watch** é uma API construída em NestJS que consome dados meteorológicos em tempo real, aplica um motor de regras de severidade (vento, chuva, sismo) e converte isso em alertas acionáveis — com **zoneamento por bairro**, **notificação automática via webhook** e **disponibilidade contínua mesmo quando a fonte de dados externa falha**.
+**São Luís Weather Watch** é uma API construída em NestJS que consome dados meteorológicos em tempo real, aplica um motor de regras de severidade e converte isso em alertas acionáveis — com **zoneamento por bairro**, **notificação automática via webhook e SMS** e **disponibilidade contínua mesmo quando a fonte de dados externa falha ou muda de contrato**.
 
-Para o gestor público: o sistema garante que a última informação confiável nunca desaparece — se a Open-Meteo cair, a API responde com o último dado válido em cache, sinalizado como tal, em vez de retornar erro ou nada.
+Para o gestor público: o sistema garante que a última informação confiável nunca desaparece, e que a população só recebe SMS quando a situação **realmente muda** de estado — sem alarme repetido, sem alarme perdido.
 
-Para o time técnico: a resiliência não é um detalhe de implementação, é a arquitetura — retry com backoff exponencial, circuit breaker com fallback para MongoDB e logs estruturados que isolam causa raiz (DNS, timeout ou indisponibilidade real) em segundos.
+Para o time técnico: a resiliência não é um detalhe de implementação, é a arquitetura — retry com backoff exponencial, circuit breaker com fallback para MongoDB, validação de contrato com `class-validator` e logs estruturados que isolam causa raiz (DNS, timeout, indisponibilidade ou mudança de schema) em segundos.
 
 ## Funcionalidades
 
@@ -27,12 +41,15 @@ Para o time técnico: a resiliência não é um detalhe de implementação, é a
 - **Retry com backoff exponencial** (RxJS `retry` + `defer`): falhas transitórias — como HTTP 503 e timeout — são reexecutadas automaticamente (até 3 tentativas, 300ms → 600ms → 1200ms), sem re-emitir a mesma requisição já resolvida.
 - **Classificação de falhas**: cada erro externo é categorizado como `DNS`, `TIMEOUT`, `INDISPONIVEL` ou `CANCELADO` via `axios.isAxiosError`, decidindo automaticamente o que vale a pena reexecutar e o que deve falhar rápido.
 - **Circuit Breaker com fallback**: se todas as tentativas contra a Open-Meteo se esgotarem, o serviço recupera o último alerta salvo no MongoDB, marca a resposta com `[MODO CONTINGÊNCIA - DADO EM CACHE]` e a retorna normalmente — o cliente nunca recebe um erro genérico de indisponibilidade.
+- **Validação de contrato (`class-validator`)**: a resposta da Open-Meteo é validada contra um DTO tipado antes de entrar no motor de regras. Se a API externa mudar a estrutura (campo renomeado, tipo diferente), a API responde **422 Unprocessable Entity** de forma explícita — em vez de propagar `undefined`/`NaN` silenciosamente ou mascarar o problema como se fosse uma indisponibilidade transitória.
 - **Logs estruturados**: cada falha é logada no formato `[origem=Open-Meteo tipo=TIMEOUT codigo=ETIMEDOUT tentativa=2/3] mensagem`, grepável e pronto para dashboards de observabilidade.
 
 ### Notificação e Analytics
-- **Webhook assíncrono e não-bloqueante**: alertas de severidade `ALERTA` ou `EMERGÊNCIA` disparam um POST para o endpoint da Defesa Civil em paralelo, sem travar a resposta ao cliente e com try/catch isolado.
+- **Máquina de estados para SMS** (`AlertEngineService`): classifica o vento em `NORMAL` / `ATENCAO` (>40km/h) / `EMERGENCIA` (>60km/h) e só dispara SMS **na transição** entre estados — nunca repete alerta enquanto a condição persiste. O estado atual é persistido no MongoDB, então um restart do servidor não gera SMS espúrio nem perde o último nível notificado.
+- **`SmsService`**: stub pronto para produção (simula o envio via log estruturado); trocar por Twilio/Zenvia é só implementar a interface `SmsProvider` — nenhuma mudança no motor de regras.
+- **Webhook assíncrono e não-bloqueante**: alertas de severidade `ALERTA` ou `EMERGÊNCIA` disparam um POST para o endpoint da Defesa Civil (configurável via `.env`) em paralelo, sem travar a resposta ao cliente e com try/catch isolado.
 - **Pipeline de agregação (média móvel)**: cálculo da precipitação média das últimas 3 horas via MongoDB Aggregation Framework, sinalizando risco de inundação súbita quando a média ultrapassa 10mm.
-- Agendamento automático (`@Cron`) executando a análise climática a cada 30 minutos.
+- Dois agendamentos automáticos (`@Cron`): análise climática completa a cada 30 minutos e o motor de SMS/estado a cada 10 minutos.
 
 ## Stack Tecnológica
 
@@ -42,11 +59,12 @@ Para o time técnico: a resiliência não é um detalhe de implementação, é a
 | Linguagem | TypeScript 5.7 |
 | Cliente HTTP | Axios + `@nestjs/axios` |
 | Reatividade / Resiliência | RxJS 7 (`retry`, `defer`, `timer`) |
+| Validação de contrato | `class-validator` + `class-transformer` |
 | Persistência | MongoDB + Mongoose |
 | Configuração | `@nestjs/config` (variáveis de ambiente) |
 | Agendamento | `@nestjs/schedule` |
 | Documentação | Swagger (`@nestjs/swagger`) |
-| Testes | Jest + `@nestjs/testing` |
+| Testes | Jest + `@nestjs/testing` + Supertest |
 
 ## Arquitetura do Projeto
 
@@ -54,18 +72,24 @@ O código é organizado em camadas por responsabilidade técnica:
 
 ```
 src/
-├── main.ts                  # Bootstrap da aplicação e configuração do Swagger
-├── controllers/             # Camada HTTP — validação de entrada e formatação de resposta
+├── main.ts                          # Bootstrap da aplicação e configuração do Swagger
+├── controllers/                     # Camada HTTP — validação de entrada e formatação de resposta
 │   ├── app.controller.ts
 │   └── weather.controller.ts
-├── services/                # Regras de negócio: motor de severidade, resiliência, webhook
-│   ├── weather.service.ts
-│   └── weather.cron.ts
-├── modules/                 # Composição de dependências (Nest DI)
+├── services/                        # Regras de negócio
+│   ├── weather.service.ts           # Motor de severidade, resiliência, geofencing, webhook
+│   ├── weather.cron.ts              # Agendamento (30 min) da análise climática completa
+│   ├── alert-engine.service.ts      # Máquina de estados NORMAL/ATENCAO/EMERGENCIA -> SMS
+│   ├── sms.service.ts               # Stub de envio de SMS (interface SmsProvider)
+│   └── task.service.ts              # Agendamento (10 min) do motor de alertas/SMS
+├── modules/                         # Composição de dependências (Nest DI)
 │   ├── app.module.ts
 │   └── weather.module.ts
-└── schemas/                 # Modelos Mongoose
-    └── weather.schema.ts
+├── schemas/                         # Modelos Mongoose
+│   ├── weather.schema.ts            # Histórico de alertas
+│   └── alert-engine-state.schema.ts # Estado atual (singleton) da máquina de estados
+└── dto/                             # Contratos validados (class-validator)
+    └── open-meteo-current-weather.dto.ts
 ```
 
 ## Como Rodar
@@ -89,14 +113,21 @@ Copie o arquivo de exemplo e preencha com suas credenciais:
 cp .env.example .env
 ```
 
-Variáveis obrigatórias no `.env`:
+Variáveis no `.env`:
 
 ```env
 MONGODB_URI=mongodb+srv://<usuario>:<senha>@<cluster>/sao-luis-weather-watch
 OPENWEATHER_API_KEY=<sua-chave-openweathermap>
+SMS_DESTINATARIO_DEFESA_CIVIL=+55XXXXXXXXXXX
+DEFESA_CIVIL_WEBHOOK_URL=
 ```
 
-> `MONGODB_URI` é obrigatória — a aplicação falha ao subir sem ela. `OPENWEATHER_API_KEY` é carregada via `ConfigService` e reservada para uma futura fonte de dados secundária; a fonte principal de clima em tempo real (Open-Meteo) não exige chave.
+| Variável | Obrigatória? | Descrição |
+|---|---|---|
+| `MONGODB_URI` | **Sim** | A aplicação falha ao subir sem ela. |
+| `OPENWEATHER_API_KEY` | Não | Reservada para uma futura fonte de dados secundária; a fonte principal (Open-Meteo) não exige chave. |
+| `SMS_DESTINATARIO_DEFESA_CIVIL` | Não | Número que recebe os SMS de transição de estado. Se vazio, o envio é apenas logado como ignorado. |
+| `DEFESA_CIVIL_WEBHOOK_URL` | Não | URL real do webhook de alertas críticos. Se vazio, o disparo é ignorado (sem tentativa de rede). |
 
 ### Executando
 
@@ -104,7 +135,7 @@ OPENWEATHER_API_KEY=<sua-chave-openweathermap>
 pnpm run start:dev
 ```
 
-O servidor sobe em `http://localhost:3000`.
+O servidor sobe em `http://localhost:3000`. Ao iniciar, dois jobs agendados ficam rodando em background: a análise climática completa (a cada 30 min) e o motor de estado/SMS (a cada 10 min).
 
 ## Documentação da API
 
@@ -119,7 +150,7 @@ http://localhost:3000/api
 | Método | Rota | Descrição |
 |---|---|---|
 | `GET` | `/` | Executa a análise climática atual e retorna o alerta vigente. |
-| `GET` | `/clima/atual` | Consulta a Open-Meteo, avalia as regras de severidade, persiste e retorna o alerta atual. |
+| `GET` | `/clima/atual` | Consulta a Open-Meteo, valida o contrato, avalia as regras de severidade, persiste e retorna o alerta atual (422 se o contrato externo mudar). |
 | `GET` | `/clima/alertas` | Histórico completo de alertas, do mais recente ao mais antigo. |
 | `GET` | `/clima/emergencias` | Feed de crises: alertas `ALERTA`/`EMERGÊNCIA` das últimas 24 horas. |
 | `GET` | `/clima/tendencia` | Média móvel de precipitação das últimas 3 horas e sinalização de risco de inundação súbita. |
@@ -127,19 +158,29 @@ http://localhost:3000/api
 ## Testes Automatizados
 
 ```bash
-pnpm test          # suíte de testes unitários (Jest)
+pnpm test          # suíte de testes unitários (Jest) — regras de negócio isoladas
 pnpm run test:cov  # com relatório de cobertura
-pnpm run test:e2e  # testes end-to-end
+pnpm run test:e2e  # suíte de integração (Supertest) — camada HTTP completa
 ```
 
-A suíte cobre, entre outros cenários:
+### Testes unitários
+Cobrem as regras de negócio isoladas do `WeatherService` e do `AlertEngineService`:
 - Geração correta de severidade `EMERGÊNCIA` e zoneamento por vento acima de 60km/h.
 - Ativação do circuit breaker e fallback para o último registro em cache quando a API externa falha.
 - Retry automático em erro 503 com sucesso na tentativa seguinte, e não-retentativa em falhas de DNS.
 - Cálculo correto da média móvel de precipitação via pipeline de agregação do MongoDB.
+- Máquina de estados: subida e descida de estado, ausência de SMS repetido para o mesmo estado, e segurança de restart (estado persistido é respeitado na primeira execução após o processo subir).
+
+### Testes de integração (Supertest)
+Um arquivo por rota (`test/clima-*.e2e-spec.ts`), subindo o Controller e o Service reais via `@nestjs/testing` e mockando apenas as bordas externas (HTTP e MongoDB) — sem depender de um MongoDB in-memory, o que mantém a suíte rápida e determinística:
+- `/clima/atual`: contrato da resposta (`nivelSeveridade`/`descricao`/`timestamp`), persistência no repositório mockado, **422 em dois cenários de contrato quebrado** e um **snapshot test** do corpo da resposta para travar regressões na lógica de risco.
+- `/clima/alertas`: ordenação decrescente por timestamp (seed inserido propositalmente fora de ordem).
+- `/clima/emergencias`: filtro de severidade + janela de 24h, incluindo teste de borda exata (23h59 dentro, 24h01 fora).
+- `/clima/tendencia`: corretude do arredondamento e do limiar de risco (`> 10mm`) sobre o resultado da agregação.
 
 ## Roadmap
 
-- Integração com canais de notificação por SMS/Push para a população.
+- Trocar o `SmsService` stub por uma integração real (Twilio ou Zenvia) implementando a interface `SmsProvider` já existente.
 - Dashboard de crise em tempo real para operadores da Defesa Civil.
 - Métricas de observabilidade (Prometheus/Grafana) a partir dos logs estruturados já existentes.
+- Pipeline de CI (GitHub Actions) para substituir os badges de build/testes por indicadores reais.
