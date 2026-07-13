@@ -1,0 +1,8 @@
+{
+  "buildCommand": "pnpm run build && pnpm --dir frontend install && pnpm --dir frontend run build",
+  "outputDirectory": "frontend/dist",
+  "rewrites": [
+    { "source": "/clima/:path*", "destination": "/api" },
+    { "source": "/api/:path*", "destination": "/api" }
+  ]
+}
