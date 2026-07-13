@@ -5,6 +5,7 @@ import { getModelToken } from '@nestjs/mongoose';
 import { Test } from '@nestjs/testing';
 import { WeatherController } from '../../src/controllers/weather.controller';
 import { WeatherAlert } from '../../src/schemas/weather.schema';
+import { SeismicSensorState } from '../../src/schemas/seismic-sensor-state.schema';
 import { WeatherService } from '../../src/services/weather.service';
 
 /**
@@ -20,6 +21,8 @@ export interface WeatherTestAppDeps {
   httpService: { get: jest.Mock; post: jest.Mock };
   configService: { get: jest.Mock };
   weatherAlertModel: any;
+  /** Opcional: por padrão, nenhuma leitura sísmica pendente (sem estado em aberto). */
+  seismicStateModel?: any;
 }
 
 export interface WeatherTestApp {
@@ -28,6 +31,8 @@ export interface WeatherTestApp {
 }
 
 export async function buildWeatherTestApp(deps: WeatherTestAppDeps): Promise<WeatherTestApp> {
+  const seismicStateModel = deps.seismicStateModel ?? createEmptySeismicStateModelMock();
+
   const moduleRef = await Test.createTestingModule({
     controllers: [WeatherController],
     providers: [
@@ -35,6 +40,7 @@ export async function buildWeatherTestApp(deps: WeatherTestAppDeps): Promise<Wea
       { provide: HttpService, useValue: deps.httpService },
       { provide: ConfigService, useValue: deps.configService },
       { provide: getModelToken(WeatherAlert.name), useValue: deps.weatherAlertModel },
+      { provide: getModelToken(SeismicSensorState.name), useValue: seismicStateModel },
     ],
   }).compile();
 
@@ -53,4 +59,12 @@ export function createEmptyConfigServiceMock(): { get: jest.Mock } {
 /** HttpService mockado, sem comportamento pré-configurado — cada teste define get/post conforme o cenário. */
 export function createHttpServiceMock(): { get: jest.Mock; post: jest.Mock } {
   return { get: jest.fn(), post: jest.fn() };
+}
+
+/** Model do sensor sísmico mockado sem nenhuma leitura pendente (comportamento padrão nos testes). */
+export function createEmptySeismicStateModelMock(): { findOne: jest.Mock; findOneAndUpdate: jest.Mock } {
+  return {
+    findOne: jest.fn().mockReturnValue({ exec: jest.fn().mockResolvedValue(null) }),
+    findOneAndUpdate: jest.fn().mockReturnValue({ exec: jest.fn().mockResolvedValue(null) }),
+  };
 }
