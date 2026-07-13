@@ -7,17 +7,21 @@
 ![TypeScript](https://img.shields.io/badge/TypeScript-5.7-3178C6?logo=typescript&logoColor=white)
 ![License](https://img.shields.io/badge/license-UNLICENSED-lightgrey)
 
-## Status: MVP completo, protótipo pronto para avaliação
+## Status: MVP completo, com painel web e em produção
 
 Todas as engenharias planejadas para o MVP estão implementadas, testadas e validadas (`tsc --noEmit`, `nest build` e as suítes de teste abaixo passam limpas):
 
 - [x] Motor de severidade (vento, chuva, sismo simulado) com geofencing por bairro
+- [x] Confirmação temporal de EMERGÊNCIA (double-check entre ciclos de avaliação diferentes, não numa leitura só)
 - [x] Circuit breaker com fallback para o último dado em cache no MongoDB
 - [x] Retry com backoff exponencial + classificação de falhas (DNS/timeout/indisponibilidade)
 - [x] Validação de contrato da API externa (`class-validator`) — retorna **422** em vez de quebrar se o formato mudar
 - [x] Webhook assíncrono e não-bloqueante para a Defesa Civil
+- [x] Log de acesso estruturado em `/clima/atual` (origem/IP + User-Agent), para auditoria de quem está monitorando
 - [x] Pipeline de agregação (média móvel de chuva) para risco de inundação súbita
 - [x] Máquina de estados (`NORMAL` → `ATENÇÃO` → `EMERGÊNCIA`) com disparo de SMS **apenas na transição**, persistida no MongoDB para sobreviver a um restart
+- [x] Painel web (React) para operadores da Defesa Civil, com painel de crise, feed de emergências e histórico
+- [x] Deploy unificado (frontend + backend) na Vercel, em produção
 - [x] Suíte de testes unitários (regras de negócio) e de integração via Supertest (camada HTTP)
 
 ## O Problema
@@ -35,6 +39,9 @@ Para o time técnico: a resiliência não é um detalhe de implementação, é a
 ### Motor de Alertas
 - Avaliação de severidade em 4 níveis: `INFORMATIVO`, `ATENÇÃO`, `ALERTA`, `EMERGÊNCIA`, a partir de vento, rajadas, precipitação e simulação de sensor sísmico.
 - **Geofencing lógico**: cada alerta carrega `zonasAfetadas`, mapeando automaticamente bairros de risco (Orla Marítima, Península, Cohab, Centro Histórico, entre outros) conforme o tipo e a severidade do evento.
+- **Double-check antes de EMERGÊNCIA**: nenhuma EMERGÊNCIA vira alerta oficial com base numa única leitura.
+  - **VENTANIA** (rajada > 60km/h): confirmada com uma segunda consulta real à Open-Meteo — se a rajada não se mantiver, o alerta é rebaixado para `ALERTA` por segurança.
+  - **TERREMOTO** (sensor sísmico simulado — não existe sensor real ainda): como uma leitura aleatória isolada não prova nada, a confirmação é **temporal**. A primeira leitura elevada fica registrada como pendente (`SeismicSensorState`, no MongoDB); só vira EMERGÊNCIA se uma segunda leitura, num ciclo de avaliação *diferente* (outra chamada a `/clima/atual`), também vier elevada dentro de uma janela de 10 minutos. Isso reduz a chance de falso-positivo de ~9% para ~0,01% por par de leituras.
 - Persistência histórica de todos os alertas no MongoDB.
 
 ### Resiliência de Rede
@@ -43,6 +50,7 @@ Para o time técnico: a resiliência não é um detalhe de implementação, é a
 - **Circuit Breaker com fallback**: se todas as tentativas contra a Open-Meteo se esgotarem, o serviço recupera o último alerta salvo no MongoDB, marca a resposta com `[MODO CONTINGÊNCIA - DADO EM CACHE]` e a retorna normalmente — o cliente nunca recebe um erro genérico de indisponibilidade.
 - **Validação de contrato (`class-validator`)**: a resposta da Open-Meteo é validada contra um DTO tipado antes de entrar no motor de regras. Se a API externa mudar a estrutura (campo renomeado, tipo diferente), a API responde **422 Unprocessable Entity** de forma explícita — em vez de propagar `undefined`/`NaN` silenciosamente ou mascarar o problema como se fosse uma indisponibilidade transitória.
 - **Logs estruturados**: cada falha é logada no formato `[origem=Open-Meteo tipo=TIMEOUT codigo=ETIMEDOUT tentativa=2/3] mensagem`, grepável e pronto para dashboards de observabilidade.
+- **Log de acesso** (`[ACESSO]`): cada chamada a `GET /clima/atual` registra IP de origem e User-Agent — rastreabilidade de quem está monitorando o sistema, relevante numa crise real.
 
 ### Notificação e Analytics
 - **Máquina de estados para SMS** (`AlertEngineService`): classifica o vento em `NORMAL` / `ATENCAO` (>40km/h) / `EMERGENCIA` (>60km/h) e só dispara SMS **na transição** entre estados — nunca repete alerta enquanto a condição persiste. O estado atual é persistido no MongoDB, então um restart do servidor não gera SMS espúrio nem perde o último nível notificado.
@@ -68,28 +76,34 @@ Para o time técnico: a resiliência não é um detalhe de implementação, é a
 
 ## Arquitetura do Projeto
 
-O código é organizado em camadas por responsabilidade técnica:
+Monorepo com o backend na raiz e o painel web em `frontend/`. O código do backend é organizado em camadas por responsabilidade técnica:
 
 ```
-src/
-├── main.ts                          # Bootstrap da aplicação e configuração do Swagger
-├── controllers/                     # Camada HTTP — validação de entrada e formatação de resposta
-│   ├── app.controller.ts
-│   └── weather.controller.ts
-├── services/                        # Regras de negócio
-│   ├── weather.service.ts           # Motor de severidade, resiliência, geofencing, webhook
-│   ├── weather.cron.ts              # Agendamento (30 min) da análise climática completa
-│   ├── alert-engine.service.ts      # Máquina de estados NORMAL/ATENCAO/EMERGENCIA -> SMS
-│   ├── sms.service.ts               # Stub de envio de SMS (interface SmsProvider)
-│   └── task.service.ts              # Agendamento (10 min) do motor de alertas/SMS
-├── modules/                         # Composição de dependências (Nest DI)
-│   ├── app.module.ts
-│   └── weather.module.ts
-├── schemas/                         # Modelos Mongoose
-│   ├── weather.schema.ts            # Histórico de alertas
-│   └── alert-engine-state.schema.ts # Estado atual (singleton) da máquina de estados
-└── dto/                             # Contratos validados (class-validator)
-    └── open-meteo-current-weather.dto.ts
+├── api/
+│   └── index.ts                     # Entrypoint da função serverless (deploy na Vercel) — reaproveita
+│                                     # o Nest app já compilado (dist/), não o código-fonte TS (ver Deploy)
+├── src/
+│   ├── main.ts                      # Bootstrap local (nest start) — usa app.setup.ts
+│   ├── app.setup.ts                 # Configuração compartilhada (CORS + Swagger) entre main.ts e api/index.ts
+│   ├── controllers/                 # Camada HTTP — validação de entrada e formatação de resposta
+│   │   ├── app.controller.ts
+│   │   └── weather.controller.ts
+│   ├── services/                    # Regras de negócio
+│   │   ├── weather.service.ts       # Motor de severidade, resiliência, geofencing, webhook
+│   │   ├── weather.cron.ts          # Agendamento (30 min) da análise climática completa
+│   │   ├── alert-engine.service.ts  # Máquina de estados NORMAL/ATENCAO/EMERGENCIA -> SMS
+│   │   ├── sms.service.ts           # Stub de envio de SMS (interface SmsProvider)
+│   │   └── task.service.ts          # Agendamento (10 min) do motor de alertas/SMS
+│   ├── modules/                     # Composição de dependências (Nest DI)
+│   │   ├── app.module.ts
+│   │   └── weather.module.ts
+│   ├── schemas/                     # Modelos Mongoose
+│   │   ├── weather.schema.ts             # Histórico de alertas
+│   │   ├── alert-engine-state.schema.ts  # Estado atual (singleton) da máquina de estados SMS
+│   │   └── seismic-sensor-state.schema.ts # Leitura sísmica pendente (singleton) — confirmação temporal
+│   └── dto/                         # Contratos validados (class-validator)
+│       └── open-meteo-current-weather.dto.ts
+└── frontend/                        # Painel web (React) — ver seção Frontend abaixo
 ```
 
 ## Como Rodar
@@ -135,7 +149,18 @@ DEFESA_CIVIL_WEBHOOK_URL=
 pnpm run start:dev
 ```
 
-O servidor sobe em `http://localhost:3000`. Ao iniciar, dois jobs agendados ficam rodando em background: a análise climática completa (a cada 30 min) e o motor de estado/SMS (a cada 10 min).
+O servidor sobe em `http://localhost:3000`. Ao iniciar, dois jobs agendados ficam rodando em background: a análise climática completa (a cada 30 min) e o motor de estado/SMS (a cada 10 min). CORS está habilitado (`app.enableCors()`), então o painel web pode consumir a API de outra origem/porta em dev.
+
+### Rodando o painel web (frontend)
+
+```bash
+cd frontend
+pnpm install
+cp .env.example .env   # VITE_API_BASE_URL=http://localhost:3000
+pnpm run dev
+```
+
+O painel sobe em `http://localhost:5173` e consome o backend local. Ver a seção [Frontend (Painel Web)](#frontend-painel-web) para detalhes.
 
 ## Documentação da API
 
@@ -155,6 +180,29 @@ http://localhost:3000/api
 | `GET` | `/clima/emergencias` | Feed de crises: alertas `ALERTA`/`EMERGÊNCIA` das últimas 24 horas. |
 | `GET` | `/clima/tendencia` | Média móvel de precipitação das últimas 3 horas e sinalização de risco de inundação súbita. |
 
+Todas as rotas são públicas (sem autenticação) e aceitam requisições de qualquer origem (CORS liberado).
+
+## Frontend (Painel Web)
+
+Painel React para operadores da Defesa Civil, em `frontend/`, consumindo os endpoints de `/clima/*`:
+
+- **Painel**: situação atual (badge de severidade, métricas de vento/chuva/temperatura, ação preventiva, zonas afetadas) + tendência de chuva.
+- **Emergências**: feed de eventos `ALERTA`/`EMERGÊNCIA` das últimas 24h.
+- **Histórico**: tabela completa de alertas registrados.
+- Trata os estados degradados que o backend expõe: banner de **modo contingência** (quando o circuit breaker cai para cache) e de **fonte externa fora do contrato** (422).
+- Atualização automática a cada 60s (moderada de propósito — `/clima/atual` dispara uma avaliação real a cada chamada) + botão de atualização manual.
+
+**Stack**: React + Vite + TypeScript + Tailwind CSS v4. Sem dependência de backend Node — é um build estático (`vite build` → `frontend/dist`).
+
+## Deploy
+
+Deploy unificado (frontend + backend) na Vercel a partir do mesmo repositório, configurado via `vercel.json` na raiz:
+
+- **Build**: `pnpm run build` (compila o backend com `nest build`) seguido do build do Vite (`frontend/dist`).
+- **Frontend**: servido como estático a partir de `frontend/dist`.
+- **Backend**: função serverless em `api/index.ts`, que reaproveita o Nest app **já compilado** (`dist/`), não o código-fonte TypeScript — o bundler da Vercel (esbuild) não emite metadata de decorators, o que quebraria a injeção de dependência do Nest se as classes decoradas fossem compiladas ali. `/clima/*` e `/api/*` (Swagger) são roteados para essa função; o restante cai no estático do frontend.
+- Em produção, o frontend usa caminho relativo para a API (mesmo domínio) — não precisa configurar `VITE_API_BASE_URL` na Vercel.
+
 ## Testes Automatizados
 
 ```bash
@@ -170,6 +218,7 @@ Cobrem as regras de negócio isoladas do `WeatherService` e do `AlertEngineServi
 - Retry automático em erro 503 com sucesso na tentativa seguinte, e não-retentativa em falhas de DNS.
 - Cálculo correto da média móvel de precipitação via pipeline de agregação do MongoDB.
 - Máquina de estados: subida e descida de estado, ausência de SMS repetido para o mesmo estado, e segurança de restart (estado persistido é respeitado na primeira execução após o processo subir).
+- Confirmação temporal do sensor sísmico: leitura isolada não confirma, segunda leitura dentro da janela confirma, janela expirada não confirma, pendência é limpa quando a leitura seguinte volta ao normal.
 
 ### Testes de integração (Supertest)
 Um arquivo por rota (`test/clima-*.e2e-spec.ts`), subindo o Controller e o Service reais via `@nestjs/testing` e mockando apenas as bordas externas (HTTP e MongoDB) — sem depender de um MongoDB in-memory, o que mantém a suíte rápida e determinística:
@@ -181,6 +230,7 @@ Um arquivo por rota (`test/clima-*.e2e-spec.ts`), subindo o Controller e o Servi
 ## Roadmap
 
 - Trocar o `SmsService` stub por uma integração real (Twilio ou Zenvia) implementando a interface `SmsProvider` já existente.
-- Dashboard de crise em tempo real para operadores da Defesa Civil.
+- Trocar o sensor sísmico simulado por uma integração real (ex.: rede USGS/observatório sismológico), aposentando a confirmação temporal por dados de fato medidos.
 - Métricas de observabilidade (Prometheus/Grafana) a partir dos logs estruturados já existentes.
 - Pipeline de CI (GitHub Actions) para substituir os badges de build/testes por indicadores reais.
+- Autenticação para os endpoints de escrita, caso o sistema passe a expor operações além de leitura.
