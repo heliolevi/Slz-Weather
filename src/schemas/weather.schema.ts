@@ -4,7 +4,18 @@ import { Document } from 'mongoose';
 
 export type WeatherAlertDocument = WeatherAlert & Document;
 
-@Schema({ timestamps: false, collection: 'weather_alerts' })
+@Schema({
+  timestamps: false,
+  collection: 'weather_alerts',
+  toJSON: {
+    virtuals: true,
+    transform: (_doc, ret) => {
+      delete ret._id;
+      delete ret.__v;
+      return ret;
+    },
+  },
+})
 export class WeatherAlert {
   @ApiProperty({ description: 'Identificador único do alerta gerado pelo MongoDB.' })
   id?: string;

@@ -1,17 +1,23 @@
-import { Controller, Get } from '@nestjs/common';
+import { Controller, Get, Logger, Req } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import type { Request } from 'express';
 import { WeatherService, RainTrendResult } from '../services/weather.service';
 import { WeatherAlert } from '../schemas/weather.schema';
 
 @ApiTags('clima')
 @Controller('clima')
 export class WeatherController {
+  private readonly logger = new Logger(WeatherController.name);
+
   constructor(private readonly weatherService: WeatherService) {}
 
   @Get('atual')
   @ApiOperation({ summary: 'Executa a análise crítica de São Luís, salva o alerta atual e retorna o estado de risco.' })
   @ApiResponse({ status: 200, description: 'Alerta atual gerado pelo motor de defesa civil.', type: WeatherAlert })
-  async getCurrentWeather(): Promise<WeatherAlert> {
+  async getCurrentWeather(@Req() request: Request): Promise<WeatherAlert> {
+    const origem = request.ip ?? request.socket.remoteAddress ?? 'desconhecida';
+    const userAgent = request.headers['user-agent'] ?? 'desconhecido';
+    this.logger.log(`[ACESSO] GET /clima/atual origem=${origem} user-agent="${userAgent}"`);
     return this.weatherService.evaluateAndPersistCurrentWeather();
   }
 
