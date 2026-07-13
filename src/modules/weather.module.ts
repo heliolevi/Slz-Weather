@@ -10,6 +10,7 @@ import { WeatherCron } from '../services/weather.cron';
 import { WeatherService } from '../services/weather.service';
 import { WeatherAlert, WeatherAlertSchema } from '../schemas/weather.schema';
 import { AlertEngineState, AlertEngineStateSchema } from '../schemas/alert-engine-state.schema';
+import { SeismicSensorState, SeismicSensorStateSchema } from '../schemas/seismic-sensor-state.schema';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { AlertEngineState, AlertEngineStateSchema } from '../schemas/alert-engin
     MongooseModule.forFeature([
       { name: WeatherAlert.name, schema: WeatherAlertSchema },
       { name: AlertEngineState.name, schema: AlertEngineStateSchema },
+      { name: SeismicSensorState.name, schema: SeismicSensorStateSchema },
     ]),
   ],
   controllers: [WeatherController],

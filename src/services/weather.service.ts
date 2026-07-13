@@ -9,6 +9,11 @@ import { isAxiosError } from 'axios';
 import { Model } from 'mongoose';
 import { OpenMeteoCurrentWeatherDto } from '../dto/open-meteo-current-weather.dto';
 import { WeatherAlert, WeatherAlertDocument } from '../schemas/weather.schema';
+import {
+  SEISMIC_SENSOR_STATE_ID,
+  SeismicSensorState,
+  SeismicSensorStateDocument,
+} from '../schemas/seismic-sensor-state.schema';
 
 export interface CurrentWeather {
   temperature_2m: number;
@@ -49,8 +54,17 @@ const MAX_TENTATIVAS_RETRY = 3;
 const RETRY_BACKOFF_BASE_MS = 300;
 const RETRY_BACKOFF_MAX_MS = 1200;
 
-const LIMIAR_TERREMOTO_EMERGENCIA = 3.5;
+// Limiar alto de propósito: como não existe sensor sísmico real, uma leitura isolada acima
+// deste valor tem ~1% de chance (ver `simulateEarthquakeSensor`). Combinado com a confirmação
+// temporal (`avaliarSensorSismico`), uma EMERGÊNCIA/TERREMOTO só se materializa com duas leituras
+// elevadas em ciclos de avaliação diferentes — ~0,01% de chance combinada — refletindo a raridade
+// real de eventos sísmicos em São Luís, uma região de baixa sismicidade.
+const LIMIAR_TERREMOTO_EMERGENCIA = 4.9;
 const LIMIAR_VENTANIA_EMERGENCIA_GUST = 60;
+// Janela dentro da qual uma segunda leitura sísmica elevada conta como confirmação da primeira.
+// Generosa o bastante para cobrir tanto o polling do front (60s) quanto o cron (30min) sem deixar
+// leituras de horas de diferença se confirmarem mutuamente como se fossem o mesmo evento.
+const JANELA_CONFIRMACAO_SISMICA_MS = 10 * 60 * 1000;
 
 @Injectable()
 export class WeatherService {
@@ -65,6 +79,8 @@ export class WeatherService {
     private readonly configService: ConfigService,
     @InjectModel(WeatherAlert.name)
     private readonly weatherAlertModel: Model<WeatherAlertDocument>,
+    @InjectModel(SeismicSensorState.name)
+    private readonly seismicStateModel: Model<SeismicSensorStateDocument>,
   ) {
     // Exemplo de carregamento seguro de API key via @nestjs/config, lida do .env (nunca hardcoded).
     this.openWeatherApiKey = this.configService.get<string>('OPENWEATHER_API_KEY', '');
@@ -79,10 +95,13 @@ export class WeatherService {
   async evaluateAndPersistCurrentWeather(): Promise<WeatherAlertDocument> {
     try {
       const current = await this.fetchCurrentWeather();
-      let alertPayload = this.buildAlertPayload(current);
+      let alertPayload = await this.buildAlertPayload(current);
 
-      if (alertPayload.nivelSeveridade === 'EMERGÊNCIA') {
-        // Sanity Check (Double-Check): nenhuma EMERGÊNCIA é persistida com base em uma única leitura.
+      if (alertPayload.nivelSeveridade === 'EMERGÊNCIA' && alertPayload.tipoAlerta === 'VENTANIA') {
+        // Sanity Check (Double-Check): nenhuma EMERGÊNCIA de VENTANIA é persistida com base numa
+        // única leitura — refaz uma consulta real à Open-Meteo antes de oficializar. (TERREMOTO tem
+        // sua própria confirmação, temporal e entre ciclos de avaliação — ver `avaliarSensorSismico`,
+        // chamada dentro de `buildAlertPayload` — então nunca chega aqui já não confirmado.)
         alertPayload = await this.confirmarEmergenciaOuRebaixar(alertPayload, current);
       }
 
@@ -324,12 +343,16 @@ export class WeatherService {
   }
 
   /**
-   * Sanity Check (Double-Check): nenhuma EMERGÊNCIA vira alerta oficial com base numa leitura só.
-   * Exige uma segunda verificação independente da MESMA dimensão que disparou o gatilho (vento
-   * re-medido para VENTANIA, um segundo rolamento do sensor sísmico para TERREMOTO) antes de
-   * confirmar. Se a rede falhar durante essa confirmação — ou se a segunda leitura não bater —
-   * o alerta é rebaixado por segurança, nunca escalado. Um estado de indisponibilidade nunca
-   * pode ser interpretado como EMERGÊNCIA confirmada.
+   * Sanity Check (Double-Check) de VENTANIA: nenhuma EMERGÊNCIA de rajada vira alerta oficial com
+   * base numa leitura só. Exige uma segunda consulta real à Open-Meteo, checando só a rajada, antes
+   * de confirmar. Se a rede falhar durante essa confirmação — ou se a segunda leitura não bater — o
+   * alerta é rebaixado por segurança, nunca escalado. Um estado de indisponibilidade nunca pode ser
+   * interpretado como EMERGÊNCIA confirmada.
+   *
+   * (TERREMOTO tem sua própria confirmação, feita ANTES deste ponto — ver `avaliarSensorSismico` —
+   * porque "confirmar" um dado simulado/aleatório rolando o mesmo `Math.random()` de novo, na mesma
+   * requisição, não confirma nada: é só outra moeda independente. A confirmação real ali é temporal,
+   * exigindo duas leituras elevadas em ciclos de avaliação diferentes.)
    */
   private async confirmarEmergenciaOuRebaixar(
     payload: Omit<WeatherAlert, 'timestamp'>,
@@ -343,7 +366,8 @@ export class WeatherService {
     let motivoNaoConfirmado = 'segunda leitura não indicou o mesmo evento crítico (provável falso positivo)';
 
     try {
-      confirmado = await this.confirmarCriticidade(payload.tipoAlerta);
+      const segundaLeituraClimatica = await this.fetchCurrentWeather();
+      confirmado = segundaLeituraClimatica.wind_gusts_10m > LIMIAR_VENTANIA_EMERGENCIA_GUST;
     } catch (error) {
       motivoNaoConfirmado = `falha ao obter a segunda leitura de confirmação: ${(error as Error).message}`;
       confirmado = false;
@@ -361,43 +385,8 @@ export class WeatherService {
         `motivo="${motivoNaoConfirmado}" timestampDecisao=${new Date().toISOString()}`,
     );
 
-    return this.rebaixarAlertaNaoConfirmado(payload.tipoAlerta, leituraOriginal);
-  }
-
-  /**
-   * Reverifica exatamente a dimensão que gerou a EMERGÊNCIA, isolada das demais:
-   * - TERREMOTO: um segundo rolamento independente do sensor (o único jeito de "confirmar" um
-   *   dado que é, por natureza, simulado/aleatório — não reaproveita a leitura de vento).
-   * - VENTANIA: uma nova consulta real à Open-Meteo, checando só a rajada — sem recalcular sismo.
-   */
-  private async confirmarCriticidade(tipoAlerta: string): Promise<boolean> {
-    if (tipoAlerta === 'TERREMOTO') {
-      const segundaLeituraSismica = this.simulateEarthquakeSensor();
-      return segundaLeituraSismica > LIMIAR_TERREMOTO_EMERGENCIA;
-    }
-
-    if (tipoAlerta === 'VENTANIA') {
-      const segundaLeituraClimatica = await this.fetchCurrentWeather();
-      return segundaLeituraClimatica.wind_gusts_10m > LIMIAR_VENTANIA_EMERGENCIA_GUST;
-    }
-
-    return false;
-  }
-
-  /**
-   * EMERGÊNCIA não confirmada: nunca simplesmente descartamos a leitura. TERREMOTO não confirmado
-   * cai para a classificação normal de vento/chuva (a leitura original ainda é válida, só o gatilho
-   * sísmico não se sustentou). VENTANIA não confirmada é rebaixada um degrau — o vento é dado real,
-   * só a rajada extrema não se manteve na segunda medição.
-   */
-  private rebaixarAlertaNaoConfirmado(
-    tipoAlertaNaoConfirmado: string,
-    current: CurrentWeather,
-  ): Omit<WeatherAlert, 'timestamp'> {
-    if (tipoAlertaNaoConfirmado === 'TERREMOTO') {
-      return this.buildAlertPayloadPorVentoEChuva(current);
-    }
-
+    // VENTANIA não confirmada é rebaixada um degrau — o vento é dado real, só a rajada extrema
+    // não se manteve na segunda medição.
     return this.withZonasAfetadas({
       cidade: 'São Luís - MA',
       tipoAlerta: 'VENTANIA',
@@ -405,9 +394,9 @@ export class WeatherService {
         'RAJADA CRÍTICA NÃO CONFIRMADA na segunda leitura de verificação — rebaixado para ALERTA por segurança. Mantenha atenção redobrada.',
       nivelSeveridade: 'ALERTA',
       acaoPreventiva: 'Fiquem longe de árvores, estruturas leves e desliguem equipamentos expostos ao vento.',
-      velocidadeVento: current.wind_speed_10m,
-      precipitacao: current.precipitation,
-      temperatura: current.temperature_2m,
+      velocidadeVento: leituraOriginal.wind_speed_10m,
+      precipitacao: leituraOriginal.precipitation,
+      temperatura: leituraOriginal.temperature_2m,
     });
   }
 
@@ -469,13 +458,13 @@ export class WeatherService {
   /**
    * Só decide o gatilho sísmico (o único componente puramente simulado/aleatório do motor).
    * Delega tudo o mais para `buildAlertPayloadPorVentoEChuva`, que trabalha só com dados reais
-   * da Open-Meteo — separar os dois evita que uma segunda leitura de confirmação de vento
-   * "role o dado" do sismo de novo por engano (ver `confirmarCriticidade`).
+   * da Open-Meteo. TERREMOTO só vira EMERGÊNCIA quando `avaliarSensorSismico` já confirmou a
+   * leitura temporalmente — nunca com base numa leitura isolada.
    */
-  private buildAlertPayload(current: CurrentWeather): Omit<WeatherAlert, 'timestamp'> {
-    const earthquake = this.simulateEarthquakeSensor();
+  private async buildAlertPayload(current: CurrentWeather): Promise<Omit<WeatherAlert, 'timestamp'>> {
+    const { confirmado } = await this.avaliarSensorSismico();
 
-    if (earthquake > LIMIAR_TERREMOTO_EMERGENCIA) {
+    if (confirmado) {
       return this.withZonasAfetadas({
         cidade: 'São Luís - MA',
         tipoAlerta: 'TERREMOTO',
@@ -489,6 +478,86 @@ export class WeatherService {
     }
 
     return this.buildAlertPayloadPorVentoEChuva(current);
+  }
+
+  /**
+   * Confirmação temporal do sensor sísmico simulado: como não existe sensor real, uma leitura
+   * isolada nunca vira EMERGÊNCIA. É preciso duas leituras elevadas em ciclos de avaliação
+   * DIFERENTES (não a mesma requisição rolando o dado duas vezes — isso não confirma nada, só
+   * joga a mesma moeda de novo) dentro de `JANELA_CONFIRMACAO_SISMICA_MS`, mais parecido com como
+   * um sensor real se comportaria: um evento sísmico real continua detectável por alguns minutos,
+   * não é um pulso isolado de uma única leitura.
+   */
+  private async avaliarSensorSismico(): Promise<{ confirmado: boolean; leituraAtual: number }> {
+    const leituraAtual = this.simulateEarthquakeSensor();
+    const estado = await this.seismicStateModel.findOne({ identificador: SEISMIC_SENSOR_STATE_ID }).exec();
+    const agora = new Date();
+
+    const pendenteValido =
+      !!estado?.timestampLeituraPendente &&
+      agora.getTime() - estado.timestampLeituraPendente.getTime() <= JANELA_CONFIRMACAO_SISMICA_MS;
+
+    if (leituraAtual > LIMIAR_TERREMOTO_EMERGENCIA) {
+      if (pendenteValido) {
+        this.logger.warn(
+          `Sensor sísmico: segunda leitura elevada (${leituraAtual}) dentro da janela de confirmação ` +
+            `(leitura anterior=${estado!.leituraPendente} às ${estado!.timestampLeituraPendente!.toISOString()}). ` +
+            'EMERGÊNCIA/TERREMOTO confirmada.',
+        );
+        await this.limparEstadoSismico();
+        return { confirmado: true, leituraAtual };
+      }
+
+      if (estado?.timestampLeituraPendente) {
+        // A pendência anterior existia, mas passou da janela de confirmação sem uma segunda leitura
+        // elevada — não conta mais. Esta leitura elevada de agora vira uma pendência nova (o relógio reinicia).
+        this.logger.warn(
+          `[AUDITORIA] Leitura sísmica pendente (${estado.leituraPendente} às ` +
+            `${estado.timestampLeituraPendente.toISOString()}) expirou sem confirmação — descartada. ` +
+            `timestampDecisao=${agora.toISOString()}`,
+        );
+      }
+
+      this.logger.warn(
+        `Sensor sísmico: leitura elevada (${leituraAtual}) registrada como pendente. Aguardando ` +
+          `confirmação em até ${JANELA_CONFIRMACAO_SISMICA_MS / 60_000}min antes de oficializar EMERGÊNCIA.`,
+      );
+      await this.registrarLeituraPendente(leituraAtual, agora);
+      return { confirmado: false, leituraAtual };
+    }
+
+    if (estado?.timestampLeituraPendente) {
+      // A leitura seguinte não confirmou o evento — descarta a pendência. Isso é diferente de
+      // expirar por tempo (ver acima): aqui a próxima leitura em si já veio normal.
+      this.logger.warn(
+        `[AUDITORIA] Leitura sísmica pendente (${estado.leituraPendente} às ` +
+          `${estado.timestampLeituraPendente.toISOString()}) não foi confirmada pela leitura seguinte ` +
+          `(${leituraAtual}) — descartada. timestampDecisao=${agora.toISOString()}`,
+      );
+      await this.limparEstadoSismico();
+    }
+
+    return { confirmado: false, leituraAtual };
+  }
+
+  private async registrarLeituraPendente(leitura: number, timestamp: Date): Promise<void> {
+    await this.seismicStateModel
+      .findOneAndUpdate(
+        { identificador: SEISMIC_SENSOR_STATE_ID },
+        { leituraPendente: leitura, timestampLeituraPendente: timestamp },
+        { upsert: true },
+      )
+      .exec();
+  }
+
+  private async limparEstadoSismico(): Promise<void> {
+    await this.seismicStateModel
+      .findOneAndUpdate(
+        { identificador: SEISMIC_SENSOR_STATE_ID },
+        { $unset: { leituraPendente: '', timestampLeituraPendente: '' } },
+        { upsert: true },
+      )
+      .exec();
   }
 
   private buildAlertPayloadPorVentoEChuva(current: CurrentWeather): Omit<WeatherAlert, 'timestamp'> {

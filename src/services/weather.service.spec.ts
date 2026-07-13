@@ -4,12 +4,14 @@ import { getModelToken } from '@nestjs/mongoose';
 import { Test, TestingModule } from '@nestjs/testing';
 import { of, throwError } from 'rxjs';
 import { WeatherAlert } from '../schemas/weather.schema';
+import { SEISMIC_SENSOR_STATE_ID, SeismicSensorState } from '../schemas/seismic-sensor-state.schema';
 import { WeatherService } from './weather.service';
 
 describe('WeatherService', () => {
   let service: WeatherService;
   let httpService: { get: jest.Mock; post: jest.Mock };
   let weatherAlertModel: any;
+  let seismicStateModel: { findOne: jest.Mock; findOneAndUpdate: jest.Mock };
   let mockSave: jest.Mock;
 
   beforeEach(async () => {
@@ -23,6 +25,13 @@ describe('WeatherService', () => {
     weatherAlertModel.findOne = jest.fn();
     weatherAlertModel.aggregate = jest.fn();
 
+    // Por padrão, nenhuma leitura sísmica pendente — cada teste sobrescreve quando precisa simular
+    // uma pendência em aberto (ver describe "Sanity Check ... TERREMOTO").
+    seismicStateModel = {
+      findOne: jest.fn().mockReturnValue({ exec: jest.fn().mockResolvedValue(null) }),
+      findOneAndUpdate: jest.fn().mockReturnValue({ exec: jest.fn().mockResolvedValue(null) }),
+    };
+
     httpService = {
       get: jest.fn(),
       post: jest.fn(),
@@ -34,6 +43,7 @@ describe('WeatherService', () => {
         { provide: HttpService, useValue: httpService },
         { provide: ConfigService, useValue: { get: jest.fn().mockReturnValue('test-openweather-api-key') } },
         { provide: getModelToken(WeatherAlert.name), useValue: weatherAlertModel },
+        { provide: getModelToken(SeismicSensorState.name), useValue: seismicStateModel },
       ],
     }).compile();
 
@@ -134,6 +144,7 @@ describe('WeatherService', () => {
           { provide: HttpService, useValue: httpService },
           { provide: ConfigService, useValue: { get: jest.fn().mockReturnValue('') } },
           { provide: getModelToken(WeatherAlert.name), useValue: weatherAlertModel },
+          { provide: getModelToken(SeismicSensorState.name), useValue: seismicStateModel },
         ],
       }).compile();
       const serviceSemWebhook = module.get<WeatherService>(WeatherService);
@@ -298,67 +309,125 @@ describe('WeatherService', () => {
       expect(auditoriaSpy).toHaveBeenCalledWith(expect.stringContaining('VENTANIA'));
     });
 
-    it('deve manter EMERGÊNCIA (TERREMOTO) quando duas leituras sísmicas consecutivas concordam', async () => {
-      httpService.get.mockReturnValue(
-        of({
-          data: {
-            current: {
-              temperature_2m: 28,
-              relative_humidity_2m: 75,
-              precipitation: 1,
-              wind_speed_10m: 10,
-              wind_gusts_10m: 15,
-            },
-          },
-        }),
-      );
-      httpService.post.mockReturnValue(of({ data: {} }));
+    const leituraSismicaVentoFraco = {
+      temperature_2m: 28,
+      relative_humidity_2m: 75,
+      precipitation: 1,
+      wind_speed_10m: 10,
+      wind_gusts_10m: 15,
+    };
+
+    it('NÃO deve gerar EMERGÊNCIA (TERREMOTO) com base numa única leitura sísmica elevada — registra como pendente e classifica por vento/chuva', async () => {
+      httpService.get.mockReturnValue(of({ data: { current: leituraSismicaVentoFraco } }));
       mockSave.mockImplementation(function (this: Record<string, unknown>) {
-        return Promise.resolve({ ...this, id: 'alert-terremoto-confirmado' });
+        return Promise.resolve({ ...this, id: 'alert-terremoto-pendente' });
       });
 
       jest
         .spyOn(service as unknown as { simulateEarthquakeSensor: () => number }, 'simulateEarthquakeSensor')
-        .mockReturnValueOnce(4.2) // 1ª leitura: dispara EMERGÊNCIA/TERREMOTO
-        .mockReturnValueOnce(3.8); // 2ª leitura (confirmação independente): também acima do limiar
-
-      const result = await service.evaluateAndPersistCurrentWeather();
-
-      expect(result.nivelSeveridade).toBe('EMERGÊNCIA');
-      expect(result.tipoAlerta).toBe('TERREMOTO');
-    });
-
-    it('deve reclassificar por vento/chuva (não descartar a leitura) quando a segunda leitura sísmica NÃO confirma', async () => {
-      httpService.get.mockReturnValue(
-        of({
-          data: {
-            current: {
-              temperature_2m: 28,
-              relative_humidity_2m: 75,
-              precipitation: 1,
-              wind_speed_10m: 10,
-              wind_gusts_10m: 15,
-            },
-          },
-        }),
-      );
-      mockSave.mockImplementation(function (this: Record<string, unknown>) {
-        return Promise.resolve({ ...this, id: 'alert-terremoto-nao-confirmado' });
-      });
-
-      jest
-        .spyOn(service as unknown as { simulateEarthquakeSensor: () => number }, 'simulateEarthquakeSensor')
-        .mockReturnValueOnce(4.2) // 1ª leitura: dispara EMERGÊNCIA/TERREMOTO (o falso positivo do bug relatado)
-        .mockReturnValueOnce(1.0); // 2ª leitura (confirmação): não confirma
-      const auditoriaSpy = jest.spyOn(service['logger'], 'warn');
+        .mockReturnValue(5.0); // leitura elevada isolada — sem confirmação prévia, nunca vira EMERGÊNCIA sozinha
 
       const result = await service.evaluateAndPersistCurrentWeather();
 
       // Vento fraco e sem chuva na leitura original -> cai para INFORMATIVO/NORMAL, não é descartado.
       expect(result.nivelSeveridade).toBe('INFORMATIVO');
       expect(result.tipoAlerta).toBe('NORMAL');
+      expect(seismicStateModel.findOneAndUpdate).toHaveBeenCalledWith(
+        { identificador: SEISMIC_SENSOR_STATE_ID },
+        expect.objectContaining({ leituraPendente: 5.0 }),
+        { upsert: true },
+      );
+    });
+
+    it('deve confirmar EMERGÊNCIA (TERREMOTO) quando uma leitura pendente dentro da janela é seguida por uma segunda leitura também elevada', async () => {
+      httpService.get.mockReturnValue(of({ data: { current: leituraSismicaVentoFraco } }));
+      httpService.post.mockReturnValue(of({ data: {} }));
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-terremoto-confirmado' });
+      });
+
+      seismicStateModel.findOne.mockReturnValue({
+        exec: jest.fn().mockResolvedValue({
+          identificador: SEISMIC_SENSOR_STATE_ID,
+          leituraPendente: 4.95,
+          timestampLeituraPendente: new Date(Date.now() - 60_000), // 1 minuto atrás — dentro da janela de 10min
+        }),
+      });
+
+      jest
+        .spyOn(service as unknown as { simulateEarthquakeSensor: () => number }, 'simulateEarthquakeSensor')
+        .mockReturnValue(5.0); // 2ª leitura, em outro ciclo de avaliação, também acima do limiar
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      expect(result.nivelSeveridade).toBe('EMERGÊNCIA');
+      expect(result.tipoAlerta).toBe('TERREMOTO');
+      expect(seismicStateModel.findOneAndUpdate).toHaveBeenCalledWith(
+        { identificador: SEISMIC_SENSOR_STATE_ID },
+        { $unset: { leituraPendente: '', timestampLeituraPendente: '' } },
+        { upsert: true },
+      );
+    });
+
+    it('NÃO deve confirmar EMERGÊNCIA (TERREMOTO) quando a leitura pendente já expirou (fora da janela de confirmação)', async () => {
+      httpService.get.mockReturnValue(of({ data: { current: leituraSismicaVentoFraco } }));
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-terremoto-expirado' });
+      });
+
+      seismicStateModel.findOne.mockReturnValue({
+        exec: jest.fn().mockResolvedValue({
+          identificador: SEISMIC_SENSOR_STATE_ID,
+          leituraPendente: 4.95,
+          timestampLeituraPendente: new Date(Date.now() - 15 * 60_000), // 15 minutos atrás — fora da janela de 10min
+        }),
+      });
+
+      jest
+        .spyOn(service as unknown as { simulateEarthquakeSensor: () => number }, 'simulateEarthquakeSensor')
+        .mockReturnValue(5.0);
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      // Pendência expirada não conta como confirmação — a leitura atual elevada vira uma NOVA pendência.
+      expect(result.nivelSeveridade).toBe('INFORMATIVO');
+      expect(result.tipoAlerta).toBe('NORMAL');
+      expect(seismicStateModel.findOneAndUpdate).toHaveBeenCalledWith(
+        { identificador: SEISMIC_SENSOR_STATE_ID },
+        expect.objectContaining({ leituraPendente: 5.0 }),
+        { upsert: true },
+      );
+    });
+
+    it('deve limpar a pendência sísmica quando a leitura atual volta ao normal', async () => {
+      httpService.get.mockReturnValue(of({ data: { current: leituraSismicaVentoFraco } }));
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-terremoto-pendencia-limpa' });
+      });
+
+      seismicStateModel.findOne.mockReturnValue({
+        exec: jest.fn().mockResolvedValue({
+          identificador: SEISMIC_SENSOR_STATE_ID,
+          leituraPendente: 4.95,
+          timestampLeituraPendente: new Date(),
+        }),
+      });
+
+      const auditoriaSpy = jest.spyOn(service['logger'], 'warn');
+
+      jest
+        .spyOn(service as unknown as { simulateEarthquakeSensor: () => number }, 'simulateEarthquakeSensor')
+        .mockReturnValue(0.5); // leitura normal — a pendência anterior não se confirma
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      expect(result.nivelSeveridade).toBe('INFORMATIVO');
+      expect(seismicStateModel.findOneAndUpdate).toHaveBeenCalledWith(
+        { identificador: SEISMIC_SENSOR_STATE_ID },
+        { $unset: { leituraPendente: '', timestampLeituraPendente: '' } },
+        { upsert: true },
+      );
       expect(auditoriaSpy).toHaveBeenCalledWith(expect.stringContaining('[AUDITORIA]'));
-      expect(auditoriaSpy).toHaveBeenCalledWith(expect.stringContaining('TERREMOTO'));
     });
   });
 
