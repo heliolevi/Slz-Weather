@@ -77,3 +77,14 @@ export class WeatherAlert {
 }
 
 export const WeatherAlertSchema = SchemaFactory.createForClass(WeatherAlert);
+
+// `timestamp` é o campo mais consultado da coleção: toda leitura de /clima/alertas, /clima/emergencias
+// e /clima/tendencia ordena e/ou filtra por ele. Sem índice, essas consultas fazem um collection scan
+// completo — barato hoje, com a coleção pequena, mas cada vez mais lento à medida que o histórico
+// cresce (a coleção nunca é podada). Descendente porque toda ordenação no código é `{ timestamp: -1 }`.
+WeatherAlertSchema.index({ timestamp: -1 });
+
+// Índice composto para a consulta de findCriticalAlertsLast24h (/clima/emergencias): filtra por
+// nivelSeveridade E por uma janela de timestamp, depois ordena por timestamp — um índice composto
+// nessa ordem cobre filtro e ordenação na mesma busca, em vez de só o filtro OU só a ordenação.
+WeatherAlertSchema.index({ nivelSeveridade: 1, timestamp: -1 });

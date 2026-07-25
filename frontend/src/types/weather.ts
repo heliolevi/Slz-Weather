@@ -31,6 +31,14 @@ export interface RainTrendResult {
   mensagem: string;
 }
 
+export interface PaginatedResult<T> {
+  data: T[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
 export const CONTINGENCY_PREFIX = '[MODO CONTINGÊNCIA - DADO EM CACHE]';
 
 export function parseContingency(descricao: string): {

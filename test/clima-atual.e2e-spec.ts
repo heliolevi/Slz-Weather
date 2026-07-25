@@ -2,6 +2,7 @@ import { INestApplication } from '@nestjs/common';
 import request from 'supertest';
 import { App } from 'supertest/types';
 import { of } from 'rxjs';
+import { LIMITE_CLIMA_ATUAL } from '../src/controllers/weather.controller';
 import {
   buildWeatherTestApp,
   createEmptyConfigServiceMock,
@@ -142,5 +143,20 @@ describe('GET /clima/atual (integração)', () => {
     // timestamp/id variam a cada execução; removidos antes de comparar com o snapshot.
     const { timestamp, id, ...corpoEstavel } = response.body;
     expect(corpoEstavel).toMatchSnapshot();
+  });
+
+  describe('Rate limiting (proteção contra abuso da Open-Meteo/MongoDB)', () => {
+    it(`deve permitir até ${LIMITE_CLIMA_ATUAL.limit} requisições por minuto e retornar 429 na seguinte`, async () => {
+      await iniciarApp();
+      httpService.get.mockReturnValue(of({ data: { current: LEITURA_EMERGENCIA_VENTO } }));
+
+      for (let i = 0; i < LIMITE_CLIMA_ATUAL.limit; i++) {
+        await request(app.getHttpServer()).get('/clima/atual').expect(200);
+      }
+
+      const response = await request(app.getHttpServer()).get('/clima/atual');
+
+      expect(response.status).toBe(429);
+    }, 15000);
   });
 });

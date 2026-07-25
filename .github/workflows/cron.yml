@@ -1,0 +1,43 @@
+name: Cron - Motor de Alertas Slz-Weatcher
+
+# O plano Hobby da Vercel limita Cron Jobs a no máximo 1x/dia — insuficiente pros ciclos de
+# 30min/10min deste projeto (ver vercel.json, que já tem a config "ideal" pronta pra quando/se
+# migrarem pro plano Pro). Até lá, este workflow é quem garante que /cron/analise-climatica e
+# /cron/motor-alertas (CronController) disparam de verdade em produção.
+#
+# Configuração necessária no repositório (Settings -> Secrets and variables -> Actions):
+#   - Secret  CRON_SECRET: o mesmo valor configurado como env var CRON_SECRET na Vercel.
+#   - Variable PROD_URL:   a URL de produção, ex. https://slz-weather-six.vercel.app (sem barra final).
+#
+# Observação: agendamentos do GitHub Actions não são garantidos no minuto exato — em períodos de
+# alta demanda a execução pode atrasar alguns minutos. Aceitável aqui; não use para SLAs rígidos.
+
+on:
+  schedule:
+    - cron: '*/30 * * * *' # análise climática completa
+    - cron: '*/10 * * * *' # motor de alertas / SMS
+  workflow_dispatch: {} # permite disparo manual pelo GitHub UI, útil para testar a config
+
+jobs:
+  disparar-cron:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Análise climática (a cada 30min)
+        if: github.event.schedule == '*/30 * * * *' || github.event_name == 'workflow_dispatch'
+        run: |
+          resposta=$(curl -s -w "\n%{http_code}" "${{ vars.PROD_URL }}/cron/analise-climatica" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          status=$(echo "$resposta" | tail -n1)
+          corpo=$(echo "$resposta" | sed '$d')
+          echo "HTTP $status: $corpo"
+          [ "$status" -lt 400 ]
+
+      - name: Motor de alertas / SMS (a cada 10min)
+        if: github.event.schedule == '*/10 * * * *' || github.event_name == 'workflow_dispatch'
+        run: |
+          resposta=$(curl -s -w "\n%{http_code}" "${{ vars.PROD_URL }}/cron/motor-alertas" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}")
+          status=$(echo "$resposta" | tail -n1)
+          corpo=$(echo "$resposta" | sed '$d')
+          echo "HTTP $status: $corpo"
+          [ "$status" -lt 400 ]

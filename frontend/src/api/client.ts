@@ -1,4 +1,4 @@
-import type { RainTrendResult, WeatherAlert } from '../types/weather';
+import type { PaginatedResult, RainTrendResult, WeatherAlert } from '../types/weather';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? (import.meta.env.DEV ? 'http://localhost:3000' : '');
 
@@ -36,7 +36,8 @@ export async function apiGet<T>(path: string): Promise<T> {
 
 export const weatherApi = {
   getCurrentWeather: () => apiGet<WeatherAlert>('/clima/atual'),
-  getAlertsHistory: () => apiGet<WeatherAlert[]>('/clima/alertas'),
+  getAlertsHistory: (page = 1, limit = 50) =>
+    apiGet<PaginatedResult<WeatherAlert>>(`/clima/alertas?page=${page}&limit=${limit}`),
   getEmergencies: () => apiGet<WeatherAlert[]>('/clima/emergencias'),
   getRainTrend: () => apiGet<RainTrendResult>('/clima/tendencia'),
 };

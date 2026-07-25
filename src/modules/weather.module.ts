@@ -2,7 +2,9 @@ import { Module } from '@nestjs/common';
 import { HttpModule } from '@nestjs/axios';
 import { MongooseModule } from '@nestjs/mongoose';
 import { ScheduleModule } from '@nestjs/schedule';
+import { CronController } from '../controllers/cron.controller';
 import { WeatherController } from '../controllers/weather.controller';
+import { CronAuthGuard } from '../guards/cron-auth.guard';
 import { AlertEngineService } from '../services/alert-engine.service';
 import { SmsService } from '../services/sms.service';
 import { TaskService } from '../services/task.service';
@@ -27,8 +29,8 @@ import { SeismicSensorState, SeismicSensorStateSchema } from '../schemas/seismic
       { name: SeismicSensorState.name, schema: SeismicSensorStateSchema },
     ]),
   ],
-  controllers: [WeatherController],
-  providers: [WeatherService, WeatherCron, AlertEngineService, SmsService, TaskService],
+  controllers: [WeatherController, CronController],
+  providers: [WeatherService, WeatherCron, AlertEngineService, SmsService, TaskService, CronAuthGuard],
   exports: [WeatherService],
 })
 export class WeatherModule {}

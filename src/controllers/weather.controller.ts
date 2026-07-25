@@ -1,8 +1,18 @@
-import { Controller, Get, Logger, Req } from '@nestjs/common';
+import { Controller, Get, Logger, Query, Req } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import type { Request } from 'express';
-import { WeatherService, RainTrendResult } from '../services/weather.service';
+import { PaginationQueryDto } from '../dto/pagination-query.dto';
+import { PaginatedResult, WeatherService, RainTrendResult } from '../services/weather.service';
 import { WeatherAlert } from '../schemas/weather.schema';
+
+// Limite bem mais restrito que o padrão global (60/min — ver ThrottlerModule em app.module.ts):
+// esta rota, diferente das outras de /clima/*, dispara uma avaliação real a cada chamada
+// (consulta à Open-Meteo + gravação no MongoDB + possível webhook para a Defesa Civil). Sem um
+// limite próprio, um cliente insistente poderia estourar a cota da Open-Meteo e inflar o banco
+// com registros inúteis. 10/min dá folga confortável pro polling do painel (1x/min por aba) e
+// ainda barra abuso.
+export const LIMITE_CLIMA_ATUAL = { limit: 10, ttl: 60_000 };
 
 @ApiTags('clima')
 @Controller('clima')
@@ -12,8 +22,10 @@ export class WeatherController {
   constructor(private readonly weatherService: WeatherService) {}
 
   @Get('atual')
+  @Throttle({ default: LIMITE_CLIMA_ATUAL })
   @ApiOperation({ summary: 'Executa a análise crítica de São Luís, salva o alerta atual e retorna o estado de risco.' })
   @ApiResponse({ status: 200, description: 'Alerta atual gerado pelo motor de defesa civil.', type: WeatherAlert })
+  @ApiResponse({ status: 429, description: 'Limite de requisições excedido (10 por minuto por IP).' })
   async getCurrentWeather(@Req() request: Request): Promise<WeatherAlert> {
     const origem = request.ip ?? request.socket.remoteAddress ?? 'desconhecida';
     const userAgent = request.headers['user-agent'] ?? 'desconhecido';
@@ -22,10 +34,25 @@ export class WeatherController {
   }
 
   @Get('alertas')
-  @ApiOperation({ summary: 'Retorna o histórico completo de eventos registrados em São Luís, ordenado do mais recente ao mais antigo.' })
-  @ApiResponse({ status: 200, description: 'Lista de registros históricos do sistema de alerta precoce.', type: [WeatherAlert] })
-  async getAlertsHistory(): Promise<WeatherAlert[]> {
-    return this.weatherService.findAllAlerts();
+  @ApiOperation({
+    summary: 'Retorna o histórico paginado de eventos registrados em São Luís, ordenado do mais recente ao mais antigo.',
+    description: 'Paginado (page/limit — ver PaginationQueryDto) para não devolver a coleção inteira a cada chamada.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Página do histórico do sistema de alerta precoce, com metadados de paginação.',
+    schema: {
+      example: {
+        data: [],
+        page: 1,
+        limit: 50,
+        total: 0,
+        totalPages: 0,
+      },
+    },
+  })
+  async getAlertsHistory(@Query() query: PaginationQueryDto): Promise<PaginatedResult<WeatherAlert>> {
+    return this.weatherService.findAllAlerts(query.page, query.limit);
   }
 
   @Get('emergencias')
