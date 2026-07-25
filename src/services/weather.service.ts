@@ -34,6 +34,14 @@ export interface RainTrendResult {
   mensagem: string;
 }
 
+export interface PaginatedResult<T> {
+  data: T[];
+  page: number;
+  limit: number;
+  total: number;
+  totalPages: number;
+}
+
 type TipoFalhaExterna = 'DNS' | 'TIMEOUT' | 'INDISPONIVEL' | 'CANCELADO' | 'DESCONHECIDO';
 
 interface FalhaExternaClassificada {
@@ -123,8 +131,21 @@ export class WeatherService {
     }
   }
 
-  async findAllAlerts(): Promise<WeatherAlertDocument[]> {
-    return this.weatherAlertModel.find().sort({ timestamp: -1 }).exec();
+  /**
+   * Histórico paginado (padrão: página 1, 50 itens — ver PaginationQueryDto). Sem paginação, esta
+   * consulta devolveria a coleção inteira a cada chamada; como ela nunca é podada, o payload só
+   * cresce com o tempo. `total`/`totalPages` vêm de um `countDocuments()` separado, em paralelo com
+   * a busca da página — ambos usam o índice em `timestamp` (ver weather.schema.ts).
+   */
+  async findAllAlerts(page: number, limit: number): Promise<PaginatedResult<WeatherAlertDocument>> {
+    const skip = (page - 1) * limit;
+
+    const [data, total] = await Promise.all([
+      this.weatherAlertModel.find().sort({ timestamp: -1 }).skip(skip).limit(limit).exec(),
+      this.weatherAlertModel.countDocuments().exec(),
+    ]);
+
+    return { data, page, limit, total, totalPages: Math.ceil(total / limit) };
   }
 
   async findCriticalAlertsLast24h(): Promise<WeatherAlertDocument[]> {

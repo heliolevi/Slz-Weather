@@ -2,6 +2,14 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { WeatherService } from './weather.service';
 
+/**
+ * Agendamento via @nestjs/schedule — só dispara sozinho em processos persistentes (dev local
+ * com `pnpm run start:dev`/`start:prod`, ou um deploy tradicional tipo Railway/Render). Numa
+ * função serverless (Vercel), o processo não fica de pé entre requisições, então este @Cron
+ * fica registrado mas nunca chega a disparar no horário. Em produção na Vercel, quem cumpre esse
+ * papel é GET /cron/analise-climatica (ver CronController), disparado externamente por Vercel
+ * Cron Jobs ou pelo workflow do GitHub Actions — ver vercel.json e .github/workflows/cron.yml.
+ */
 @Injectable()
 export class WeatherCron {
   private readonly logger = new Logger(WeatherCron.name);

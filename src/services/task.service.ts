@@ -2,6 +2,10 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { AlertEngineService } from './alert-engine.service';
 
+/**
+ * Mesma ressalva de WeatherCron: só dispara sozinho em processo persistente. Em produção na
+ * Vercel, quem cumpre esse papel é GET /cron/motor-alertas (ver CronController).
+ */
 @Injectable()
 export class TaskService {
   private readonly logger = new Logger(TaskService.name);

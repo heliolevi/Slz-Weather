@@ -1,8 +1,11 @@
 import { HttpService } from '@nestjs/axios';
 import { ConfigService } from '@nestjs/config';
 import { INestApplication } from '@nestjs/common';
+import { APP_GUARD } from '@nestjs/core';
 import { getModelToken } from '@nestjs/mongoose';
 import { Test } from '@nestjs/testing';
+import { ThrottlerGuard, ThrottlerModule } from '@nestjs/throttler';
+import { configureApp } from '../../src/app.setup';
 import { WeatherController } from '../../src/controllers/weather.controller';
 import { WeatherAlert } from '../../src/schemas/weather.schema';
 import { SeismicSensorState } from '../../src/schemas/seismic-sensor-state.schema';
@@ -34,6 +37,9 @@ export async function buildWeatherTestApp(deps: WeatherTestAppDeps): Promise<Wea
   const seismicStateModel = deps.seismicStateModel ?? createEmptySeismicStateModelMock();
 
   const moduleRef = await Test.createTestingModule({
+    // Mesma config de ThrottlerModule usada em produção (ver AppModule) — os testes de rate
+    // limiting (test/clima-atual.e2e-spec.ts) dependem de o guard estar realmente ativo aqui.
+    imports: [ThrottlerModule.forRoot([{ name: 'default', ttl: 60_000, limit: 60 }])],
     controllers: [WeatherController],
     providers: [
       WeatherService,
@@ -41,10 +47,15 @@ export async function buildWeatherTestApp(deps: WeatherTestAppDeps): Promise<Wea
       { provide: ConfigService, useValue: deps.configService },
       { provide: getModelToken(WeatherAlert.name), useValue: deps.weatherAlertModel },
       { provide: getModelToken(SeismicSensorState.name), useValue: seismicStateModel },
+      { provide: APP_GUARD, useClass: ThrottlerGuard },
     ],
   }).compile();
 
   const app = moduleRef.createNestApplication();
+  // Mesma configuração usada em produção (main.ts/api/index.ts) — sobretudo o ValidationPipe
+  // global, do qual a validação de PaginationQueryDto em /clima/alertas depende. Reaproveitar
+  // configureApp() aqui evita que o harness de teste e a produção divirjam silenciosamente.
+  configureApp(app);
   const weatherService = moduleRef.get(WeatherService);
   await app.init();
 

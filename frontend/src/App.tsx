@@ -29,10 +29,11 @@ function Skeleton() {
 
 function App() {
   const [tab, setTab] = useState<Tab>('painel');
+  const [historyPage, setHistoryPage] = useState(1);
   const currentAlert = useCurrentAlert();
   const rainTrend = useRainTrend();
   const emergencies = useEmergencies();
-  const history = useAlertsHistory();
+  const history = useAlertsHistory(historyPage);
 
   const isOnline = currentAlert.error === null || currentAlert.error.status !== 0;
 
@@ -120,14 +121,46 @@ function App() {
 
         {tab === 'historico' && (
           <div className="flex flex-col gap-4">
-            <h1 className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>
-              Histórico de alertas
-            </h1>
+            <div className="flex items-center justify-between">
+              <h1 className="text-lg font-bold" style={{ color: 'var(--text-primary)' }}>
+                Histórico de alertas
+              </h1>
+              {history.data && history.data.total > 0 && (
+                <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                  {history.data.total} registro{history.data.total === 1 ? '' : 's'} no total
+                </span>
+              )}
+            </div>
+
             {history.error && (
               <StatusBanner tone="error" title="Falha ao consultar histórico" description={history.error.message} />
             )}
             {!history.error && history.loading && !history.data && <Skeleton />}
-            {history.data && <AlertsHistoryTable alerts={history.data} />}
+            {history.data && <AlertsHistoryTable alerts={history.data.data} />}
+
+            {history.data && history.data.totalPages > 1 && (
+              <div className="flex items-center justify-center gap-3 pt-1">
+                <button
+                  onClick={() => setHistoryPage((p) => Math.max(1, p - 1))}
+                  disabled={historyPage <= 1}
+                  className="rounded-md border px-3 py-1.5 text-xs font-semibold disabled:opacity-40"
+                  style={{ borderColor: 'var(--border-hairline)', color: 'var(--text-secondary)' }}
+                >
+                  ← Anterior
+                </button>
+                <span className="text-xs" style={{ color: 'var(--text-muted)' }}>
+                  Página {history.data.page} de {history.data.totalPages}
+                </span>
+                <button
+                  onClick={() => setHistoryPage((p) => Math.min(history.data!.totalPages, p + 1))}
+                  disabled={historyPage >= history.data.totalPages}
+                  className="rounded-md border px-3 py-1.5 text-xs font-semibold disabled:opacity-40"
+                  style={{ borderColor: 'var(--border-hairline)', color: 'var(--text-secondary)' }}
+                >
+                  Próxima →
+                </button>
+              </div>
+            )}
           </div>
         )}
       </main>
