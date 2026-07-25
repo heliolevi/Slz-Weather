@@ -5,9 +5,5 @@
     { "source": "/clima/:path*", "destination": "/api" },
     { "source": "/api/:path*", "destination": "/api" },
     { "source": "/cron/:path*", "destination": "/api" }
-  ],
-  "crons": [
-    { "path": "/cron/analise-climatica", "schedule": "*/30 * * * *" },
-    { "path": "/cron/motor-alertas", "schedule": "*/10 * * * *" }
   ]
 }

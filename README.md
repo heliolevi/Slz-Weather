@@ -20,7 +20,7 @@ Todas as engenharias planejadas para o MVP estão implementadas, testadas e vali
 - [x] Log de acesso estruturado em `/clima/atual` (origem/IP + User-Agent), para auditoria de quem está monitorando
 - [x] Rate limiting por IP (`@nestjs/throttler`) — 10/min em `/clima/atual` e `/`, 60/min nas demais rotas
 - [x] Índice composto no MongoDB + paginação em `/clima/alertas`, para o histórico não crescer sem limite a cada resposta
-- [x] Disparo confiável dos jobs periódicos em produção serverless (endpoints `/cron/*` autenticados, via Vercel Cron Jobs e/ou GitHub Actions)
+- [x] Disparo confiável dos jobs periódicos em produção serverless (endpoints `/cron/*` autenticados, acionados via GitHub Actions — o plano Hobby da Vercel não suporta Cron Jobs frequentes)
 - [x] Pipeline de agregação (média móvel de chuva) para risco de inundação súbita
 - [x] Máquina de estados (`NORMAL` → `ATENÇÃO` → `EMERGÊNCIA`) com disparo de SMS **apenas na transição**, persistida no MongoDB para sobreviver a um restart
 - [x] Painel web (React) para operadores da Defesa Civil, com painel de crise, feed de emergências e histórico
@@ -61,7 +61,7 @@ Para o time técnico: a resiliência não é um detalhe de implementação, é a
 - **`SmsService`**: stub pronto para produção (simula o envio via log estruturado); trocar por Twilio/Zenvia é só implementar a interface `SmsProvider` — nenhuma mudança no motor de regras.
 - **Webhook assíncrono e não-bloqueante**: alertas de severidade `ALERTA` ou `EMERGÊNCIA` disparam um POST para o endpoint da Defesa Civil (configurável via `.env`) em paralelo, sem travar a resposta ao cliente e com try/catch isolado.
 - **Pipeline de agregação (média móvel)**: cálculo da precipitação média das últimas 3 horas via MongoDB Aggregation Framework, sinalizando risco de inundação súbita quando a média ultrapassa 10mm.
-- **Agendamento**: dois ciclos periódicos — análise climática completa a cada 30 minutos e o motor de SMS/estado a cada 10 minutos. Em processo persistente (dev local, `pnpm run start:prod` num servidor tradicional), quem dispara é o `@Cron` interno (`@nestjs/schedule`, em `WeatherCron`/`TaskService`). Em produção na Vercel (serverless — o processo não fica de pé entre requisições, então um `@Cron` registrado no boot nunca chega a disparar sozinho), quem dispara são os endpoints `GET /cron/analise-climatica` e `GET /cron/motor-alertas` (`CronController`), protegidos por um token (`CRON_SECRET`) e acionados externamente — ver a seção [Deploy](#deploy) para os detalhes de Vercel Cron Jobs vs. GitHub Actions.
+- **Agendamento**: dois ciclos periódicos — análise climática completa a cada 30 minutos e o motor de SMS/estado a cada 10 minutos. Em processo persistente (dev local, `pnpm run start:prod` num servidor tradicional), quem dispara é o `@Cron` interno (`@nestjs/schedule`, em `WeatherCron`/`TaskService`). Em produção na Vercel (serverless — o processo não fica de pé entre requisições, então um `@Cron` registrado no boot nunca chega a disparar sozinho), quem dispara são os endpoints `GET /cron/analise-climatica` e `GET /cron/motor-alertas` (`CronController`), protegidos por um token (`CRON_SECRET`) e acionados externamente pelo GitHub Actions — ver a seção [Deploy](#deploy) para os detalhes.
 
 ## Stack Tecnológica
 
@@ -226,9 +226,17 @@ Deploy unificado (frontend + backend) na Vercel a partir do mesmo repositório, 
 - **Backend**: função serverless em `api/index.ts`, que reaproveita o Nest app **já compilado** (`dist/`), não o código-fonte TypeScript — o bundler da Vercel (esbuild) não emite metadata de decorators, o que quebraria a injeção de dependência do Nest se as classes decoradas fossem compiladas ali. `/clima/*`, `/cron/*` e `/api/*` (Swagger) são roteados para essa função; o restante cai no estático do frontend.
 - Em produção, o frontend usa caminho relativo para a API (mesmo domínio) — não precisa configurar `VITE_API_BASE_URL` na Vercel.
 
-### Jobs periódicos em produção (Vercel Cron Jobs vs. GitHub Actions)
+### Jobs periódicos em produção (GitHub Actions — não Vercel Cron Jobs)
 
-O `vercel.json` já declara os Cron Jobs "ideais" (30min/10min, batendo em `/cron/*`) — mas o **plano Hobby da Vercel limita Cron Jobs a no máximo 1x/dia**, insuficiente para esses ciclos. Só o plano Pro libera intervalos de minutos. Até migrar de plano (se um dia fizer sentido), quem garante o disparo de verdade é o workflow `.github/workflows/cron.yml`, rodando nos mesmos horários via GitHub Actions (gratuito, sem mudar de plano — mas sem garantia de disparo no minuto exato, como qualquer cron do GitHub Actions).
+O **plano Hobby da Vercel limita Cron Jobs a no máximo 1x/dia** — e não apenas ignora um schedule mais frequente: **recusa o deploy inteiro** se o `vercel.json` declarar um cron fora desse limite ("Hobby accounts are limited to daily cron jobs"). Por isso `vercel.json` **não** declara um bloco `crons` — quem garante o disparo de verdade, nos intervalos de 30min/10min, é o workflow `.github/workflows/cron.yml`, rodando via GitHub Actions (gratuito, sem mudar de plano — mas sem garantia de disparo no minuto exato, como qualquer cron do GitHub Actions).
+
+Se um dia migrarem para o plano Pro (que libera intervalos de minutos), basta adicionar de volta ao `vercel.json`:
+```json
+"crons": [
+  { "path": "/cron/analise-climatica", "schedule": "*/30 * * * *" },
+  { "path": "/cron/motor-alertas", "schedule": "*/10 * * * *" }
+]
+```
 
 Configuração necessária (uma vez):
 
