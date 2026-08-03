@@ -431,6 +431,81 @@ describe('WeatherService', () => {
     });
   });
 
+  describe('Degraus de severidade por chuva (ATENÇÃO/ALERTA/EMERGÊNCIA)', () => {
+    const leituraBase = {
+      temperature_2m: 27,
+      relative_humidity_2m: 90,
+      wind_speed_10m: 10,
+      wind_gusts_10m: 15,
+    };
+
+    it('deve gerar ATENÇÃO (CHUVA_FORTE) quando a precipitação está entre 4 e 10mm', async () => {
+      httpService.get.mockReturnValue(of({ data: { current: { ...leituraBase, precipitation: 6 } } }));
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-chuva-atencao' });
+      });
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      expect(result.nivelSeveridade).toBe('ATENÇÃO');
+      expect(result.tipoAlerta).toBe('CHUVA_FORTE');
+      expect(result.zonasAfetadas).toEqual(['Cohab', 'Centro Histórico', 'Anjo da Guarda', 'Avenida Guajajaras']);
+    });
+
+    it('deve gerar ALERTA (TEMPORAL) quando a precipitação ultrapassa 10mm', async () => {
+      httpService.get.mockReturnValue(of({ data: { current: { ...leituraBase, precipitation: 15 } } }));
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-chuva-alerta' });
+      });
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      expect(result.nivelSeveridade).toBe('ALERTA');
+      expect(result.tipoAlerta).toBe('TEMPORAL');
+      expect(result.descricao).toContain('ALAGAMENTO IMINENTE');
+    });
+
+    it('deve gerar EMERGÊNCIA (TEMPORAL) quando a precipitação atinge chuva torrencial (≥25mm) e a segunda leitura confirma', async () => {
+      httpService.get.mockReturnValue(of({ data: { current: { ...leituraBase, precipitation: 30 } } }));
+      httpService.post.mockReturnValue(of({ data: {} }));
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-chuva-emergencia' });
+      });
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      expect(httpService.get).toHaveBeenCalledTimes(2); // 1ª leitura + confirmação (double-check)
+      expect(result.nivelSeveridade).toBe('EMERGÊNCIA');
+      expect(result.tipoAlerta).toBe('TEMPORAL');
+      expect(result.descricao).toContain('CHUVA TORRENCIAL');
+    });
+
+    it('deve rebaixar para ALERTA quando a segunda leitura NÃO confirma a chuva torrencial (falso positivo)', async () => {
+      let chamada = 0;
+      httpService.get.mockImplementation(() => {
+        chamada += 1;
+        if (chamada === 1) {
+          return of({ data: { current: { ...leituraBase, precipitation: 30 } } });
+        }
+        return of({ data: { current: { ...leituraBase, precipitation: 8 } } });
+      });
+      httpService.post.mockReturnValue(of({ data: {} }));
+      mockSave.mockImplementation(function (this: Record<string, unknown>) {
+        return Promise.resolve({ ...this, id: 'alert-chuva-rebaixada' });
+      });
+      const auditoriaSpy = jest.spyOn(service['logger'], 'warn');
+
+      const result = await service.evaluateAndPersistCurrentWeather();
+
+      expect(httpService.get).toHaveBeenCalledTimes(2);
+      expect(result.nivelSeveridade).toBe('ALERTA');
+      expect(result.tipoAlerta).toBe('TEMPORAL');
+      expect(result.descricao).toContain('NÃO CONFIRMADA');
+      expect(auditoriaSpy).toHaveBeenCalledWith(expect.stringContaining('[AUDITORIA]'));
+      expect(auditoriaSpy).toHaveBeenCalledWith(expect.stringContaining('TEMPORAL'));
+    });
+  });
+
   describe('Validação de contrato - ranges fisicamente plausíveis (Sanity Check de payload)', () => {
     it('deve rejeitar (422) quando a velocidade do vento vier fisicamente implausível', async () => {
       httpService.get.mockReturnValue(

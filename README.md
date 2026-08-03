@@ -41,9 +41,11 @@ Para o time técnico: a resiliência não é um detalhe de implementação, é a
 
 ### Motor de Alertas
 - Avaliação de severidade em 4 níveis: `INFORMATIVO`, `ATENÇÃO`, `ALERTA`, `EMERGÊNCIA`, a partir de vento, rajadas, precipitação e simulação de sensor sísmico.
-- **Geofencing lógico**: cada alerta carrega `zonasAfetadas`, mapeando automaticamente bairros de risco (Orla Marítima, Península, Cohab, Centro Histórico, entre outros) conforme o tipo e a severidade do evento.
+- **Degraus de vento (`VENTANIA`)**: `ATENÇÃO` (vento ≥ 25km/h) → `ALERTA` (vento > 40km/h) → `EMERGÊNCIA` (rajada > 60km/h).
+- **Degraus de chuva** (`precipitacao`, mm no intervalo atual retornado pela Open-Meteo): `ATENÇÃO`/`CHUVA_FORTE` (≥ 4mm) → `ALERTA`/`TEMPORAL` (> 10mm, "alagamento iminente") → `EMERGÊNCIA`/`TEMPORAL` (≥ 25mm, "chuva torrencial").
+- **Geofencing lógico**: cada alerta carrega `zonasAfetadas`, mapeando automaticamente bairros de risco (Orla Marítima, Península, Cohab, Centro Histórico, entre outros) conforme o tipo e a severidade do evento — a partir de `ATENÇÃO`, tanto para vento quanto para chuva.
 - **Double-check antes de EMERGÊNCIA**: nenhuma EMERGÊNCIA vira alerta oficial com base numa única leitura.
-  - **VENTANIA** (rajada > 60km/h): confirmada com uma segunda consulta real à Open-Meteo — se a rajada não se mantiver, o alerta é rebaixado para `ALERTA` por segurança.
+  - **VENTANIA** (rajada > 60km/h) e **TEMPORAL** (precipitação ≥ 25mm): confirmadas com uma segunda consulta real à Open-Meteo, checando a mesma grandeza que disparou o alerta — se não se confirmar, o alerta é rebaixado para `ALERTA` por segurança.
   - **TERREMOTO** (sensor sísmico simulado — não existe sensor real ainda): como uma leitura aleatória isolada não prova nada, a confirmação é **temporal**. A primeira leitura elevada fica registrada como pendente (`SeismicSensorState`, no MongoDB); só vira EMERGÊNCIA se uma segunda leitura, num ciclo de avaliação *diferente* (outra chamada a `/clima/atual`), também vier elevada dentro de uma janela de 10 minutos. Isso reduz a chance de falso-positivo de ~9% para ~0,01% por par de leituras.
 - Persistência histórica de todos os alertas no MongoDB.
 
@@ -259,6 +261,7 @@ pnpm run test:e2e  # suíte de integração (Supertest) — camada HTTP completa
 ### Testes unitários
 Cobrem as regras de negócio isoladas do `WeatherService` e do `AlertEngineService`:
 - Geração correta de severidade `EMERGÊNCIA` e zoneamento por vento acima de 60km/h.
+- Degraus de severidade por chuva (`CHUVA_FORTE`/ATENÇÃO, `TEMPORAL`/ALERTA, `TEMPORAL`/EMERGÊNCIA) e double-check de chuva torrencial (confirma/rebaixa/rede falha durante a confirmação).
 - Ativação do circuit breaker e fallback para o último registro em cache quando a API externa falha.
 - Retry automático em erro 503 com sucesso na tentativa seguinte, e não-retentativa em falhas de DNS.
 - Cálculo correto da média móvel de precipitação via pipeline de agregação do MongoDB.

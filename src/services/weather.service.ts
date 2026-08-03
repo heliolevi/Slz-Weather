@@ -55,7 +55,7 @@ interface FalhaExternaClassificada {
 const ZONAS_VENTO = ['Orla Marítima', 'Península', 'Avenida Litorânea'];
 const ZONAS_CHUVA = ['Cohab', 'Centro Histórico', 'Anjo da Guarda', 'Avenida Guajajaras'];
 const SEVERIDADES_VENTO_AFETADO = ['ATENÇÃO', 'ALERTA', 'EMERGÊNCIA'];
-const SEVERIDADES_CHUVA_AFETADA = ['ALERTA', 'EMERGÊNCIA'];
+const SEVERIDADES_CHUVA_AFETADA = ['ATENÇÃO', 'ALERTA', 'EMERGÊNCIA'];
 const CONTINGENCIA_PREFIXO = '[MODO CONTINGÊNCIA - DADO EM CACHE]';
 
 const MAX_TENTATIVAS_RETRY = 3;
@@ -69,6 +69,12 @@ const RETRY_BACKOFF_MAX_MS = 1200;
 // real de eventos sísmicos em São Luís, uma região de baixa sismicidade.
 const LIMIAR_TERREMOTO_EMERGENCIA = 4.9;
 const LIMIAR_VENTANIA_EMERGENCIA_GUST = 60;
+// Degraus de chuva, no mesmo espírito dos 3 degraus de vento (ATENÇÃO/ALERTA/EMERGÊNCIA) — antes
+// só existia um único patamar (>10mm), então chuva nunca escalava além de ALERTA por mais intensa
+// que fosse. Valores em mm no intervalo atual retornado pela Open-Meteo (~equivalente a mm/h).
+const LIMIAR_CHUVA_ATENCAO = 4;
+const LIMIAR_CHUVA_ALERTA = 10;
+const LIMIAR_CHUVA_EMERGENCIA = 25;
 // Janela dentro da qual uma segunda leitura sísmica elevada conta como confirmação da primeira.
 // Generosa o bastante para cobrir tanto o polling do front (60s) quanto o cron (30min) sem deixar
 // leituras de horas de diferença se confirmarem mutuamente como se fossem o mesmo evento.
@@ -105,11 +111,15 @@ export class WeatherService {
       const current = await this.fetchCurrentWeather();
       let alertPayload = await this.buildAlertPayload(current);
 
-      if (alertPayload.nivelSeveridade === 'EMERGÊNCIA' && alertPayload.tipoAlerta === 'VENTANIA') {
-        // Sanity Check (Double-Check): nenhuma EMERGÊNCIA de VENTANIA é persistida com base numa
-        // única leitura — refaz uma consulta real à Open-Meteo antes de oficializar. (TERREMOTO tem
-        // sua própria confirmação, temporal e entre ciclos de avaliação — ver `avaliarSensorSismico`,
-        // chamada dentro de `buildAlertPayload` — então nunca chega aqui já não confirmado.)
+      if (
+        alertPayload.nivelSeveridade === 'EMERGÊNCIA' &&
+        (alertPayload.tipoAlerta === 'VENTANIA' || alertPayload.tipoAlerta === 'TEMPORAL')
+      ) {
+        // Sanity Check (Double-Check): nenhuma EMERGÊNCIA de VENTANIA ou TEMPORAL (chuva torrencial)
+        // é persistida com base numa única leitura — refaz uma consulta real à Open-Meteo antes de
+        // oficializar. (TERREMOTO tem sua própria confirmação, temporal e entre ciclos de avaliação —
+        // ver `avaliarSensorSismico`, chamada dentro de `buildAlertPayload` — então nunca chega aqui
+        // já não confirmado.)
         alertPayload = await this.confirmarEmergenciaOuRebaixar(alertPayload, current);
       }
 
@@ -364,8 +374,9 @@ export class WeatherService {
   }
 
   /**
-   * Sanity Check (Double-Check) de VENTANIA: nenhuma EMERGÊNCIA de rajada vira alerta oficial com
-   * base numa leitura só. Exige uma segunda consulta real à Open-Meteo, checando só a rajada, antes
+   * Sanity Check (Double-Check) de VENTANIA/TEMPORAL: nenhuma EMERGÊNCIA de rajada ou de chuva
+   * torrencial vira alerta oficial com base numa leitura só. Exige uma segunda consulta real à
+   * Open-Meteo, checando a mesma grandeza que disparou a EMERGÊNCIA (rajada ou precipitação), antes
    * de confirmar. Se a rede falhar durante essa confirmação — ou se a segunda leitura não bater — o
    * alerta é rebaixado por segurança, nunca escalado. Um estado de indisponibilidade nunca pode ser
    * interpretado como EMERGÊNCIA confirmada.
@@ -388,7 +399,10 @@ export class WeatherService {
 
     try {
       const segundaLeituraClimatica = await this.fetchCurrentWeather();
-      confirmado = segundaLeituraClimatica.wind_gusts_10m > LIMIAR_VENTANIA_EMERGENCIA_GUST;
+      confirmado =
+        payload.tipoAlerta === 'VENTANIA'
+          ? segundaLeituraClimatica.wind_gusts_10m > LIMIAR_VENTANIA_EMERGENCIA_GUST
+          : segundaLeituraClimatica.precipitation >= LIMIAR_CHUVA_EMERGENCIA;
     } catch (error) {
       motivoNaoConfirmado = `falha ao obter a segunda leitura de confirmação: ${(error as Error).message}`;
       confirmado = false;
@@ -406,15 +420,32 @@ export class WeatherService {
         `motivo="${motivoNaoConfirmado}" timestampDecisao=${new Date().toISOString()}`,
     );
 
-    // VENTANIA não confirmada é rebaixada um degrau — o vento é dado real, só a rajada extrema
-    // não se manteve na segunda medição.
+    if (payload.tipoAlerta === 'VENTANIA') {
+      // VENTANIA não confirmada é rebaixada um degrau — o vento é dado real, só a rajada extrema
+      // não se manteve na segunda medição.
+      return this.withZonasAfetadas({
+        cidade: 'São Luís - MA',
+        tipoAlerta: 'VENTANIA',
+        descricao:
+          'RAJADA CRÍTICA NÃO CONFIRMADA na segunda leitura de verificação — rebaixado para ALERTA por segurança. Mantenha atenção redobrada.',
+        nivelSeveridade: 'ALERTA',
+        acaoPreventiva: 'Fiquem longe de árvores, estruturas leves e desliguem equipamentos expostos ao vento.',
+        velocidadeVento: leituraOriginal.wind_speed_10m,
+        precipitacao: leituraOriginal.precipitation,
+        temperatura: leituraOriginal.temperature_2m,
+      });
+    }
+
+    // TEMPORAL (chuva torrencial) não confirmado é rebaixado para o mesmo patamar de ALERTA já
+    // usado para chuva forte/alagamento iminente — a precipitação é dado real, só o volume
+    // torrencial da primeira leitura não se manteve na segunda medição.
     return this.withZonasAfetadas({
       cidade: 'São Luís - MA',
-      tipoAlerta: 'VENTANIA',
+      tipoAlerta: 'TEMPORAL',
       descricao:
-        'RAJADA CRÍTICA NÃO CONFIRMADA na segunda leitura de verificação — rebaixado para ALERTA por segurança. Mantenha atenção redobrada.',
+        'CHUVA TORRENCIAL NÃO CONFIRMADA na segunda leitura de verificação — rebaixado para ALERTA por segurança. Mantenha atenção redobrada em áreas alagáveis.',
       nivelSeveridade: 'ALERTA',
-      acaoPreventiva: 'Fiquem longe de árvores, estruturas leves e desliguem equipamentos expostos ao vento.',
+      acaoPreventiva: 'Evite áreas baixas e desloque-se por rotas alternativas seguras.',
       velocidadeVento: leituraOriginal.wind_speed_10m,
       precipitacao: leituraOriginal.precipitation,
       temperatura: leituraOriginal.temperature_2m,
@@ -626,7 +657,21 @@ export class WeatherService {
       });
     }
 
-    if (precipitation > 10) {
+    if (precipitation >= LIMIAR_CHUVA_EMERGENCIA) {
+      return this.withZonasAfetadas({
+        cidade: 'São Luís - MA',
+        tipoAlerta: 'TEMPORAL',
+        descricao:
+          'CHUVA TORRENCIAL. Risco crítico de alagamento severo e deslizamentos em áreas de encosta. Evacue pontos baixos imediatamente.',
+        nivelSeveridade: 'EMERGÊNCIA',
+        acaoPreventiva: 'Evacue áreas alagáveis, evite deslocamentos e busque abrigo em local elevado e seguro.',
+        velocidadeVento: windSpeed,
+        precipitacao: precipitation,
+        temperatura: current.temperature_2m,
+      });
+    }
+
+    if (precipitation > LIMIAR_CHUVA_ALERTA) {
       return this.withZonasAfetadas({
         cidade: 'São Luís - MA',
         tipoAlerta: 'TEMPORAL',
@@ -634,6 +679,19 @@ export class WeatherService {
           'ALAGAMENTO IMINENTE. Evitar pontos críticos históricos de São Luís (como trechos da Cohab, Centro Histórico e Areinha).',
         nivelSeveridade: 'ALERTA',
         acaoPreventiva: 'Evite áreas baixas e desloque-se por rotas alternativas seguras.',
+        velocidadeVento: windSpeed,
+        precipitacao: precipitation,
+        temperatura: current.temperature_2m,
+      });
+    }
+
+    if (precipitation >= LIMIAR_CHUVA_ATENCAO) {
+      return this.withZonasAfetadas({
+        cidade: 'São Luís - MA',
+        tipoAlerta: 'CHUVA_FORTE',
+        descricao: 'Chuva forte em curso. Possibilidade de alagamentos pontuais em vias e pontos baixos da cidade.',
+        nivelSeveridade: 'ATENÇÃO',
+        acaoPreventiva: 'Monitore o nível de água em vias alagáveis e evite trafegar por pontos baixos.',
         velocidadeVento: windSpeed,
         precipitacao: precipitation,
         temperatura: current.temperature_2m,
